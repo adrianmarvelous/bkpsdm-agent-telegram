@@ -1,0 +1,26 @@
+{
+  "name": "agent-bkpsdm-telegram",
+  "version": "1.0.0",
+  "description": "Telegram Bot untuk BKPSDM",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js"
+  },
+  "keywords": [
+    "telegram",
+    "bot",
+    "bkpsdm"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "dotenv": "^17.4.2",
+    "mysql2": "^3.22.5",
+    "node-telegram-bot-api": "^1.1.2",
+    "openai": "^6.45.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.14"
+  }
+}
