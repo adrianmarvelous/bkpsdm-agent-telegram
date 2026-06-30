@@ -1,4 +1,4 @@
-const { query } = require('./database');
+const api = require('./apiClient');
 
 // =============== PARSER TANGGAL BAHASA INDONESIA ===============
 
@@ -14,8 +14,6 @@ const BULAN_INDONESIA = {
 /**
  * Mengubah berbagai format tanggal ke YYYY-MM-DD
  * Support: "26 juni", "26 Juni 2026", "2026-06-26", "26-06-2026"
- * @param {string} input - Teks tanggal
- * @returns {string|null} - Format YYYY-MM-DD atau null jika gagal
  */
 function parseIndonesianDate(input) {
   if (!input || typeof input !== 'string') return null;
@@ -61,7 +59,7 @@ function parseIndonesianDate(input) {
   return null;
 }
 
-// =============== TOOLS DATABASE ===============
+// =============== TOOLS DATABASE (via API) ===============
 
 const DB_TOOLS = [
   {
@@ -72,18 +70,7 @@ const DB_TOOLS = [
       properties: {},
     },
     handler: async () => {
-      const today = new Date().toISOString().split('T')[0];
-      const rows = await query(
-        'web',
-        `SELECT id, nama_acara, tanggal_mulai, pukul_mulai, pukul_selesai, tempat, keterangan
-         FROM dashboard_web_jadwal_rapat
-         WHERE tanggal_mulai = ?
-         ORDER BY pukul_mulai`,
-        [today],
-      );
-      return rows.length > 0
-        ? rows
-        : { message: `Tidak ada jadwal rapat untuk hari ini (${today})` };
+      return await api.getJadwalHariIni();
     },
   },
   {
@@ -107,18 +94,7 @@ const DB_TOOLS = [
           message: `Maaf, saya tidak bisa memahami format tanggal "${args.tanggal}". Gunakan format seperti "26 juni" atau "2026-06-26".`,
         };
       }
-
-      const rows = await query(
-        'web',
-        `SELECT id, nama_acara, tanggal_mulai, pukul_mulai, pukul_selesai, tempat, keterangan
-         FROM dashboard_web_jadwal_rapat
-         WHERE tanggal_mulai = ?
-         ORDER BY pukul_mulai`,
-        [parsed],
-      );
-      return rows.length > 0
-        ? rows
-        : { message: `Tidak ada jadwal rapat untuk tanggal ${parsed}` };
+      return await api.getJadwalByTanggal(parsed);
     },
   },
   {
@@ -129,28 +105,7 @@ const DB_TOOLS = [
       properties: {},
     },
     handler: async () => {
-      const now = new Date();
-      const dayOfWeek = now.getDay();
-      const diffToMonday = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
-      const monday = new Date(now);
-      monday.setDate(now.getDate() + diffToMonday);
-      const sunday = new Date(monday);
-      sunday.setDate(monday.getDate() + 6);
-
-      const start = monday.toISOString().split('T')[0];
-      const end = sunday.toISOString().split('T')[0];
-
-      const rows = await query(
-        'web',
-        `SELECT id, nama_acara, tanggal_mulai, pukul_mulai, pukul_selesai, tempat, keterangan
-         FROM dashboard_web_jadwal_rapat
-         WHERE tanggal_mulai BETWEEN ? AND ?
-         ORDER BY tanggal_mulai, pukul_mulai`,
-        [start, end],
-      );
-      return rows.length > 0
-        ? rows
-        : { message: `Tidak ada jadwal rapat minggu ini (${start} - ${end})` };
+      return await api.getJadwalMingguIni();
     },
   },
   {
@@ -161,14 +116,7 @@ const DB_TOOLS = [
       properties: {},
     },
     handler: async () => {
-      const rows = await query(
-        'web',
-        `SELECT id, nama_acara, tanggal_mulai, pukul_mulai, pukul_selesai, tempat, keterangan
-         FROM dashboard_web_jadwal_rapat
-         ORDER BY tanggal_mulai DESC
-         LIMIT 10`,
-      );
-      return rows;
+      return await api.getSemuaJadwal();
     },
   },
   // =============== TOOLS TUGAS (SIJAKA) ===============
@@ -180,21 +128,7 @@ const DB_TOOLS = [
       properties: {},
     },
     handler: async () => {
-      const today = new Date().toISOString().split('T')[0];
-      const rows = await query(
-        'sijaka',
-        `SELECT dt.id, dt.tugas, dt.tanggal, dt.jam, dt.disposisi_ke,
-                GROUP_CONCAT(dtc.nama SEPARATOR ', ') AS pegawai
-         FROM disposisi_tugas dt
-         LEFT JOIN disposisi_tugas_content dtc ON dt.id = dtc.id_disposisi_tugas
-         WHERE dt.tanggal = ?
-         GROUP BY dt.id
-         ORDER BY dt.jam`,
-        [today],
-      );
-      return rows.length > 0
-        ? rows
-        : { message: `Tidak ada tugas untuk hari ini (${today})` };
+      return await api.getTugasHariIni();
     },
   },
   {
@@ -215,20 +149,7 @@ const DB_TOOLS = [
       if (!parsed) {
         return { error: true, message: `Tidak bisa memahami format tanggal "${args.tanggal}".` };
       }
-      const rows = await query(
-        'sijaka',
-        `SELECT dt.id, dt.tugas, dt.tanggal, dt.jam, dt.disposisi_ke,
-                GROUP_CONCAT(dtc.nama SEPARATOR ', ') AS pegawai
-         FROM disposisi_tugas dt
-         LEFT JOIN disposisi_tugas_content dtc ON dt.id = dtc.id_disposisi_tugas
-         WHERE dt.tanggal = ?
-         GROUP BY dt.id
-         ORDER BY dt.jam`,
-        [parsed],
-      );
-      return rows.length > 0
-        ? rows
-        : { message: `Tidak ada tugas untuk tanggal ${parsed}` };
+      return await api.getTugasByTanggal(parsed);
     },
   },
   {
@@ -239,17 +160,7 @@ const DB_TOOLS = [
       properties: {},
     },
     handler: async () => {
-      const rows = await query(
-        'sijaka',
-        `SELECT dt.id, dt.tugas, dt.tanggal, dt.jam, dt.disposisi_ke,
-                GROUP_CONCAT(dtc.nama SEPARATOR ', ') AS pegawai
-         FROM disposisi_tugas dt
-         LEFT JOIN disposisi_tugas_content dtc ON dt.id = dtc.id_disposisi_tugas
-         GROUP BY dt.id
-         ORDER BY dt.tanggal DESC
-         LIMIT 10`,
-      );
-      return rows;
+      return await api.getSemuaTugas();
     },
   },
 ];

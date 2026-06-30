@@ -1,4 +1,4 @@
-const { execute } = require('./database');
+const api = require('./apiClient');
 
 /**
  * State disposisi sementara per chat
@@ -32,7 +32,7 @@ function clearDisposisiState(chatId) {
 }
 
 /**
- * Menyimpan disposisi ke database
+ * Menyimpan disposisi via API
  */
 async function saveDisposisi(chatId, namaList) {
   const state = disposisiState.get(chatId);
@@ -48,52 +48,34 @@ async function saveDisposisi(chatId, namaList) {
     : String(tgl).split('T')[0] || new Date().toISOString().split('T')[0];
   const jamRapat = jadwalData.pukul_mulai || new Date().toTimeString().slice(0, 8);
 
-  // 1. Insert ke disposisi_tugas
-  const result = await execute(
-    'sijaka',
-    `INSERT INTO disposisi_tugas (tugas, tanggal, jam, disposisi_ke, created_at, updated_at)
-     VALUES (?, ?, ?, ?, NOW(), NOW())`,
-    [tugasText, tanggalRapat, jamRapat, 'Telegram Bot'],
-  );
-
-  const idTugas = result.insertId;
-
-  // 2. Insert ke disposisi_tugas_content untuk setiap nama
+  // Parse nama (pisahkan dengan koma)
   const names = namaList.split(',').map(n => n.trim()).filter(n => n);
-  for (const nama of names) {
-    await execute(
-      'sijaka',
-      `INSERT INTO disposisi_tugas_content (id_disposisi_tugas, nip_nik, nama, created_at)
-       VALUES (?, ?, ?, NOW())`,
-      [idTugas, '-', nama],
-    );
-  }
+
+  // Kirim ke API
+  const result = await api.createTugas({
+    tugas: tugasText,
+    tanggal: tanggalRapat,
+    jam: jamRapat,
+    disposisi_ke: 'Telegram Bot',
+    pegawai: names,
+  });
 
   // Bersihkan state
   clearDisposisiState(chatId);
 
-  return { idTugas, totalNama: names.length, names };
+  return {
+    idTugas: result.id || result.insertId,
+    totalNama: names.length,
+    names,
+  };
 }
 
 /**
- * Menghapus tugas beserta relasi content-nya
+ * Menghapus tugas beserta relasi content-nya via API
  */
 async function deleteTugas(tugasId) {
-  // Hapus content dulu (foreign key)
-  await execute(
-    'sijaka',
-    'DELETE FROM disposisi_tugas_content WHERE id_disposisi_tugas = ?',
-    [tugasId],
-  );
-
-  // Hapus induk
-  const result = await execute(
-    'sijaka',
-    'DELETE FROM disposisi_tugas WHERE id = ?',
-    [tugasId],
-  );
-
-  return result.affectedRows > 0;
+  const result = await api.deleteTugasById(tugasId);
+  return result.deleted || result.affectedRows > 0;
 }
 
 module.exports = {

@@ -2,7 +2,7 @@ require('dotenv').config();
 const { TelegramBot } = require('node-telegram-bot-api');
 const { askAI } = require('./services/ai');
 const { getHistory, addMessage, clearHistory } = require('./services/conversation');
-const { checkConnection, checkAllConnections, closeAllPools, query } = require('./services/database');
+const api = require('./services/apiClient');
 const { startDisposisi, getDisposisiState, clearDisposisiState, saveDisposisi, deleteTugas } = require('./services/disposisi');
 
 // Ambil token dari environment variable
@@ -49,16 +49,22 @@ console.log('🤖 Bot Telegram BKPSDM sedang berjalan...');
 console.log('🔗 Terhubung ke OpenRouter AI');
 console.log('💬 Kirim pesan apa pun dengan bahasa alami!');
 
-// Cek koneksi database saat startup (tidak blocking)
+// Cek koneksi API saat startup (tidak blocking)
 (async () => {
-  const results = await checkAllConnections();
-  results.forEach((status) => {
-    if (status.ok) {
-      console.log(`  ✅ ${status.name}: ${status.message}`);
-    } else {
-      console.warn(`  ⚠️ ${status.name}: ${status.message} (bot tetap berjalan)`);
+  try {
+    const health = await api.healthCheck();
+    if (health.databases) {
+      health.databases.forEach((db) => {
+        if (db.ok) {
+          console.log(`  ✅ ${db.name}: ${db.message}`);
+        } else {
+          console.warn(`  ⚠️ ${db.name}: ${db.message} (bot tetap berjalan)`);
+        }
+      });
     }
-  });
+  } catch (err) {
+    console.warn(`  ⚠️ API Health Check gagal: ${err.message} (bot tetap berjalan)`);
+  }
 })();
 
 // =============== COMMAND HANDLERS ===============
@@ -167,11 +173,18 @@ bot.onText(/\/status/, async (msg) => {
   const aiConfigured = process.env.OPENROUTER_API_KEY ? '✅ Terkonfigurasi' : '❌ Belum diatur';
   const aiModel = process.env.OPENROUTER_MODEL || 'meta-llama/llama-3.1-8b-instruct:free';
 
-  // Cek status semua database (real-time)
-  const dbResults = await checkAllConnections();
-  const dbStatusText = dbResults
-    .map((s) => `  ${s.ok ? '✅' : '❌'} ${s.name}: ${s.ok ? 'Terhubung' : s.message}`)
-    .join('\n');
+  // Cek status semua database via API (real-time)
+  let dbStatusText = '⚠️ Tidak bisa hubungi API backend';
+  try {
+    const health = await api.healthCheck();
+    if (health.databases) {
+      dbStatusText = health.databases
+        .map((s) => `  ${s.ok ? '✅' : '❌'} ${s.name}: ${s.ok ? 'Terhubung' : s.message}`)
+        .join('\n');
+    }
+  } catch (err) {
+    dbStatusText = `  ❌ API: ${err.message}`;
+  }
 
   const statusMessage = `
 ✅ *Bot Status: AKTIF*
@@ -537,15 +550,15 @@ bot.on('callback_query', async (callbackQuery) => {
 
   const jadwalId = data.replace('disposisi_', '');
   
-  // Cari data jadwal dari result yang sudah ditampilkan
-  const rows = await query(
-    'web',
-    `SELECT id, nama_acara, tanggal_mulai, pukul_mulai, tempat
-     FROM dashboard_web_jadwal_rapat WHERE id = ?`,
-    [jadwalId],
-  );
+  // Cari data jadwal via API
+  let rows;
+  try {
+    rows = await api.getJadwalById(jadwalId);
+  } catch (err) {
+    return bot.sendMessage(chatId, '❌ Data rapat tidak ditemukan.');
+  }
 
-  if (rows.length === 0) {
+  if (!rows || rows.length === 0) {
     return bot.sendMessage(chatId, '❌ Data rapat tidak ditemukan.');
   }
 
@@ -583,13 +596,11 @@ bot.on('error', (error) => {
 process.on('SIGINT', async () => {
   console.log('\n🛑 Menghentikan bot...');
   bot.stopPolling();
-  await closeAllPools();
   process.exit(0);
 });
 
 process.on('SIGTERM', async () => {
   console.log('\n🛑 Menghentikan bot...');
   bot.stopPolling();
-  await closeAllPools();
   process.exit(0);
 });
