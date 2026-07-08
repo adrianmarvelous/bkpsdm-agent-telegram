@@ -163,6 +163,18 @@ const DB_TOOLS = [
       return await api.getSemuaTugas();
     },
   },
+  // =============== TOOLS BBM NON-FOSIL ===============
+  {
+    name: 'get_bbm_non_fosil_hari_ini',
+    description: 'Mendapatkan data BBM Non-Fosil untuk hari ini',
+    parameters: {
+      type: 'object',
+      properties: {},
+    },
+    handler: async () => {
+      return await api.getBbmNonFosilHariIni();
+    },
+  },
 ];
 
 /** Mendapatkan definisi tools untuk function calling AI */

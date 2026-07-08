@@ -358,6 +358,31 @@ bot.onText(/\/tekocak\b(?: (.+))?/, async (msg, match) => {
   return runTekocakTask(chatId, 'all', 'Semua Task');
 });
 
+// =============== BBM NON-FOSIL COMMAND ===============
+
+// /bbm — lihat data BBM Non-Fosil hari ini
+bot.onText(/\/bbm/, async (msg) => {
+  const chatId = msg.chat.id;
+  if (!isAuthorized(chatId)) {
+    return bot.sendMessage(chatId, '⛔ Anda tidak memiliki akses ke bot ini.');
+  }
+
+  try {
+    const waitMsg = await bot.sendMessage(chatId, '⏳ Mengambil data BBM Non-Fosil...');
+    const data = await api.getBbmNonFosilHariIni();
+    try { await bot.deleteMessage(chatId, waitMsg.message_id); } catch (_) {}
+
+    const formatted = formatBbm(data, 'BBM Non-Fosil Hari Ini 🛢️');
+    if (formatted.text) {
+      await bot.sendMessage(chatId, formatted.text, { parse_mode: 'HTML' });
+    } else {
+      await bot.sendMessage(chatId, '📭 Tidak ada data BBM Non-Fosil.');
+    }
+  } catch (err) {
+    await bot.sendMessage(chatId, `❌ Error: ${err.message}`);
+  }
+});
+
 // =============== DIRECT DATABASE QUERY HANDLER ===============
 
 /**
@@ -486,6 +511,25 @@ function detectTekocakQuery(text) {
   return null;
 }
 
+/**
+ * Deteksi apakah pesan berisi permintaan BBM Non-Fosil
+ */
+function detectBbmQuery(text) {
+  const lower = text.toLowerCase().trim();
+
+  if (/^(bbm|bbm non.?fosil|bahan bakar).*(hari.ini|sekarang)/i.test(lower)) {
+    return { tool: 'get_bbm_non_fosil_hari_ini', args: {} };
+  }
+  if (/(bbm|bbm non.?fosil|bahan bakar)/i.test(lower) && /(tampilkan|lihat|cek|munculkan)/i.test(lower)) {
+    return { tool: 'get_bbm_non_fosil_hari_ini', args: {} };
+  }
+  if (lower === 'bbm' || lower === 'bbm hari ini') {
+    return { tool: 'get_bbm_non_fosil_hari_ini', args: {} };
+  }
+
+  return null;
+}
+
 function formatJadwal(rows, title) {
   if (!rows || rows.length === 0) return { text: null, keyboard: null };
   if (rows.message) return { text: `📭 ${rows.message}`, keyboard: null };
@@ -531,6 +575,21 @@ function formatTugas(rows, title) {
 
   msg += '<i>Klik 🗑 Hapus untuk menghapus tugas</i>';
   return { text: msg, keyboard };
+}
+
+function formatBbm(rows, title) {
+  if (!rows || rows.length === 0) return { text: null, keyboard: null };
+  if (rows.message) return { text: `📭 ${rows.message}`, keyboard: null };
+
+  let msg = `🛢️ <b>${title}</b>\n\n`;
+  rows.forEach((r, i) => {
+    msg += `${i + 1}. ${r.nama || r.jenis || '-'}\n`;
+    if (r.jumlah) msg += `   📦 Jumlah: ${r.jumlah}\n`;
+    if (r.keterangan) msg += `   📝 ${r.keterangan}\n`;
+    msg += '\n';
+  });
+
+  return { text: msg.trim(), keyboard: null };
 }
 
 // =============== TEXT MESSAGE HANDLER (Natural Language via AI) ===============
@@ -644,6 +703,19 @@ bot.on('message', async (msg) => {
         update: tekocakQuery.nip ? `Update 1 Pegawai (NIP: ${tekocakQuery.nip})` : 'Update Semua Pegawai',
       };
       return runTekocakTask(chatId, tekocakQuery.task, labels[tekocakQuery.task] || tekocakQuery.task, tekocakQuery.nip);
+    }
+
+    // Cek apakah ini query BBM Non-Fosil
+    const bbmQuery = detectBbmQuery(text);
+    if (bbmQuery) {
+      try { await bot.deleteMessage(chatId, waitMsg.message_id); } catch (_) {}
+      const result = await executeTool(bbmQuery.tool, bbmQuery.args);
+      const formatted = formatBbm(result, 'BBM Non-Fosil Hari Ini 🛢️');
+      if (formatted.text) {
+        return await bot.sendMessage(chatId, formatted.text, { parse_mode: 'HTML' });
+      } else {
+        return await bot.sendMessage(chatId, '📭 Tidak ada data BBM Non-Fosil.');
+      }
     }
 
     // Jika bukan query database, lanjutkan ke AI

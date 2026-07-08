@@ -196,6 +196,16 @@ async function healthCheck() {
   return await request('GET', '/health.php');
 }
 
+// ===================== BBM NON-FOSIL =====================
+
+/** GET /api/ai-agent/bbm-non-fosil/hari-ini.php */
+async function getBbmNonFosilHariIni() {
+  const data = await request('GET', '/bbm-non-fosil/hari-ini.php');
+  return data.rows && data.rows.length > 0
+    ? data.rows
+    : { message: data.message || 'Tidak ada data BBM Non-Fosil untuk hari ini' };
+}
+
 module.exports = {
   // Jadwal
   getJadwalHariIni,
@@ -209,6 +219,8 @@ module.exports = {
   getSemuaTugas,
   createTugas,
   deleteTugasById,
+  // BBM
+  getBbmNonFosilHariIni,
   // Health
   healthCheck,
 };
