@@ -31,7 +31,6 @@ function ensureTekocakEnv() {
     if (eqIdx === -1) continue;
     const key = trimmed.slice(0, eqIdx).trim();
     const val = trimmed.slice(eqIdx + 1).trim().replace(/^["']|["']$/g, '');
-    // Jangan overwrite yang sudah ada di process.env (prioritas env utama)
     if (!process.env[key]) {
       process.env[key] = val;
     }
@@ -109,6 +108,16 @@ async function runTask(taskName, onProgress = () => {}, nip = null) {
   if (config.HEADLESS) log('🕶️ Mode: Headless');
   log('');
 
+  // Hook console.log agar output task module juga ke-capture
+  const originalLog = console.log;
+  const hookedLog = (...args) => {
+    const msg = args.join(' ');
+    lines.push(msg);
+    onProgress(msg);
+    originalLog(...args);
+  };
+  console.log = hookedLog;
+
   let browser;
   try {
     browser = await chromium.launch({
@@ -117,7 +126,7 @@ async function runTask(taskName, onProgress = () => {}, nip = null) {
     });
     const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
 
-    // Load task modules (dari dalam TEKOCAK_DIR agar require paths-nya benar)
+    // Load task modules
     const login = require(path.join(TEKOCAK_DIR, 'tasks', 'login'));
     const generate = require(path.join(TEKOCAK_DIR, 'tasks', 'generate'));
     const updatePegawai = require(path.join(TEKOCAK_DIR, 'tasks', 'update-pegawai'));
@@ -130,6 +139,7 @@ async function runTask(taskName, onProgress = () => {}, nip = null) {
     if (taskName === 'login') {
       const duration = (Date.now() - startTime) / 1000;
       log(`⏱️ Selesai dalam ${formatDuration(duration)}`);
+      console.log = originalLog;
       await browser.close();
       return { success: true, output: lines.join('\n'), duration };
     }
@@ -151,10 +161,12 @@ async function runTask(taskName, onProgress = () => {}, nip = null) {
 
     const duration = (Date.now() - startTime) / 1000;
     log(`⏱️ **Selesai dalam ${formatDuration(duration)}**`);
+    console.log = originalLog;
     await browser.close();
     return { success: true, output: lines.join('\n'), duration };
 
   } catch (err) {
+    console.log = originalLog;
     try { if (browser) await browser.close(); } catch (_) {}
     const duration = (Date.now() - startTime) / 1000;
     log(`❌ **Error:** ${err.message}`);

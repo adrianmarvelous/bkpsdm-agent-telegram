@@ -49,13 +49,19 @@ async function run(page) {
     }
     await page.waitForTimeout(5000);
   }
-  console.log('  ✓ Generate selesai!');
+  console.log('  ✓ Proses generate selesai, menunggu modal sukses...');
 
+  // Tunggu modal sukses muncul (dialog dengan tombol OK)
   try {
+    await page.waitForSelector('dialog[open]', { timeout: 15000 });
+    console.log('  ✓ Modal sukses muncul');
     const ok = page.locator('button:has-text("Ok"), button:has-text("OK")').first();
     await ok.waitFor({ state: 'visible', timeout: 5000 });
     await ok.click();
-  } catch { /* ok */ }
+    console.log('  ✓ Tombol OK diklik');
+  } catch (err) {
+    console.log('  ⚠️ Modal sukses tidak terdeteksi, lanjut: ' + err.message.split('\n')[0]);
+  }
 }
 
 // ===== Standalone =====
