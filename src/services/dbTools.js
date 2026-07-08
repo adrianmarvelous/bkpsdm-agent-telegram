@@ -175,6 +175,23 @@ const DB_TOOLS = [
       return await api.getBbmNonFosilHariIni();
     },
   },
+  {
+    name: 'get_bbm_non_fosil_by_tanggal',
+    description: 'Mendapatkan data BBM Non-Fosil berdasarkan tanggal (format: DD/MM/YYYY)',
+    parameters: {
+      type: 'object',
+      properties: {
+        tanggal: {
+          type: 'string',
+          description: 'Tanggal dalam format DD/MM/YYYY. Contoh: "08/07/2026"',
+        },
+      },
+      required: ['tanggal'],
+    },
+    handler: async (args) => {
+      return await api.getBbmNonFosilByTanggal(args.tanggal);
+    },
+  },
 ];
 
 /** Mendapatkan definisi tools untuk function calling AI */

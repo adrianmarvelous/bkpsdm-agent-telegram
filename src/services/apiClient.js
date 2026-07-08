@@ -13,7 +13,7 @@
 const BASE_URL = process.env.API_BASE_URL || 'https://bkpsdm.surabaya.go.id/api/ai-agent';
 const API_USERNAME = process.env.API_USERNAME;
 const API_PASSWORD = process.env.API_PASSWORD;
-const TIMEOUT_MS = 15000;
+const TIMEOUT_MS = 30000;
 
 // Token cache
 let authToken = null;
@@ -198,12 +198,20 @@ async function healthCheck() {
 
 // ===================== BBM NON-FOSIL =====================
 
-/** GET /api/ai-agent/bbm-non-fosil/hari-ini.php */
+/**
+ * GET /api/ai-agent/bbm-non-fosil/hari-ini.php
+ * Response: { success, tanggal, text, data }
+ */
 async function getBbmNonFosilHariIni() {
-  const data = await request('GET', '/bbm-non-fosil/hari-ini.php');
-  return data.rows && data.rows.length > 0
-    ? data.rows
-    : { message: data.message || 'Tidak ada data BBM Non-Fosil untuk hari ini' };
+  return await request('GET', '/bbm-non-fosil/hari-ini.php');
+}
+
+/**
+ * GET /api/ai-agent/bbm-non-fosil/tanggal.php?tanggal=DD/MM/YYYY
+ * Response: { success, tanggal, text, data }
+ */
+async function getBbmNonFosilByTanggal(tanggal) {
+  return await request('GET', `/bbm-non-fosil/tanggal.php?tanggal=${encodeURIComponent(tanggal)}`);
 }
 
 module.exports = {
@@ -221,6 +229,7 @@ module.exports = {
   deleteTugasById,
   // BBM
   getBbmNonFosilHariIni,
+  getBbmNonFosilByTanggal,
   // Health
   healthCheck,
 };

@@ -577,19 +577,34 @@ function formatTugas(rows, title) {
   return { text: msg, keyboard };
 }
 
-function formatBbm(rows, title) {
-  if (!rows || rows.length === 0) return { text: null, keyboard: null };
-  if (rows.message) return { text: `📭 ${rows.message}`, keyboard: null };
+function formatBbm(response, title) {
+  // Response API: { success, tanggal, text, data }
+  if (!response) return { text: null, keyboard: null };
 
-  let msg = `🛢️ <b>${title}</b>\n\n`;
-  rows.forEach((r, i) => {
-    msg += `${i + 1}. ${r.nama || r.jenis || '-'}\n`;
-    if (r.jumlah) msg += `   📦 Jumlah: ${r.jumlah}\n`;
-    if (r.keterangan) msg += `   📝 ${r.keterangan}\n`;
+  // Jika sukses tapi tidak ada data
+  if (response.success === false) {
+    return { text: `📭 ${response.message || 'Tidak ada data BBM Non-Fosil'}`, keyboard: null };
+  }
+
+  // Jika ada text pre-formatted dari backend (WhatsApp message)
+  if (response.text) {
+    let msg = `🛢️ <b>${title}</b>\n\n`;
+    msg += response.text;
+    return { text: msg, keyboard: null };
+  }
+
+  // Fallback: render dari data
+  if (response.data) {
+    let msg = `🛢️ <b>${title}</b>\n`;
+    if (response.tanggal) msg += `📅 ${response.tanggal}\n`;
     msg += '\n';
-  });
+    msg += Object.entries(response.data)
+      .map(([k, v]) => `• <b>${k}</b>: ${v}`)
+      .join('\n');
+    return { text: msg, keyboard: null };
+  }
 
-  return { text: msg.trim(), keyboard: null };
+  return { text: null, keyboard: null };
 }
 
 // =============== TEXT MESSAGE HANDLER (Natural Language via AI) ===============
@@ -709,12 +724,20 @@ bot.on('message', async (msg) => {
     const bbmQuery = detectBbmQuery(text);
     if (bbmQuery) {
       try { await bot.deleteMessage(chatId, waitMsg.message_id); } catch (_) {}
-      const result = await executeTool(bbmQuery.tool, bbmQuery.args);
-      const formatted = formatBbm(result, 'BBM Non-Fosil Hari Ini 🛢️');
-      if (formatted.text) {
-        return await bot.sendMessage(chatId, formatted.text, { parse_mode: 'HTML' });
-      } else {
-        return await bot.sendMessage(chatId, '📭 Tidak ada data BBM Non-Fosil.');
+      try {
+        const result = await executeTool(bbmQuery.tool, bbmQuery.args);
+        const formatted = formatBbm(result, 'BBM Non-Fosil Hari Ini 🛢️');
+        if (formatted.text) {
+          return await bot.sendMessage(chatId, formatted.text, { parse_mode: 'HTML' });
+        } else {
+          return await bot.sendMessage(chatId, '📭 Tidak ada data BBM Non-Fosil.');
+        }
+      } catch (err) {
+        return await bot.sendMessage(
+          chatId,
+          `⏳ *BBM Non-Fosil*\n\nServer sedang sibuk, coba lagi nanti ya.\n\n${err.message.includes('timeout') ? '⚠️ Koneksi timeout — mungkin data masih diproses di backend.' : `❌ ${err.message}`}`,
+          { parse_mode: 'Markdown' }
+        );
       }
     }
 
