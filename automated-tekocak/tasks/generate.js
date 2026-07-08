@@ -42,7 +42,24 @@ async function run(page) {
     await page.waitForSelector('#pesan_modal.in, #pesan_modal.show', { timeout: 8000 });
     console.log('     [Modal progress muncul]');
 
+    // Baca progress pertama KALI (0%) langsung
     let lastPct = -1;
+    let totalData = 0;
+    const firstTxt = await page.evaluate(() => {
+      try { const s = document.querySelector('#proses-data'); return s ? s.textContent || '' : ''; }
+      catch { return ''; }
+    }).catch(() => '');
+    const firstM = firstTxt.match(/Proses ke : (\d+) dari total (\d+)/);
+    if (firstM) {
+      totalData = parseInt(firstM[2]);
+      const pct = Math.round((parseInt(firstM[1])/parseInt(firstM[2]))*100);
+      const nextMilestone = Math.ceil(pct / 10) * 10; // Cetak tiap 10%
+      if (pct !== lastPct) {
+        console.log(`     🔄 ${firstM[1]}/${firstM[2]} (${pct}%)`);
+        lastPct = pct;
+      }
+    }
+
     while (true) {
       const modalVisible = await page.evaluate(() => {
         try {
@@ -51,7 +68,10 @@ async function run(page) {
         } catch { return false; }
       }).catch(() => false);
       if (!modalVisible) {
-        console.log('     [Modal progress tertutup]');
+        // Tampilkan progress terakhir sebelum modal nutup
+        if (lastPct >= 0 && lastPct < 100) {
+          console.log(`     ⏹️ Berhenti di ${lastPct}% (modal ditutup)`);
+        }
         break;
       }
 
@@ -64,10 +84,13 @@ async function run(page) {
 
       const m = txt.match(/Proses ke : (\d+) dari total (\d+)/);
       if (m) {
+        totalData = parseInt(m[2]);
         const pct = Math.round((parseInt(m[1])/parseInt(m[2]))*100);
-        if (pct !== lastPct) {
-          const bar = '█'.repeat(Math.round(pct/5)) + '░'.repeat(Math.round((100-pct)/5));
-          console.log(`     ${bar} ${m[1]}/${m[2]} (${pct}%)`);
+        const milestone = Math.floor(pct / 10) * 10;
+        const lastMilestone = Math.floor(lastPct / 10) * 10;
+        // Cetak setiap 10% atau ketika berubah
+        if (pct !== lastPct && (milestone > lastMilestone || pct === 100)) {
+          console.log(`     🔄 ${m[1]}/${m[2]} (${pct}%)`);
           lastPct = pct;
         }
         if (pct >= 100) {
@@ -75,11 +98,15 @@ async function run(page) {
           break;
         }
       }
-      try { await page.waitForTimeout(2000); } catch { break; }
+      try { await page.waitForTimeout(1000); } catch { break; } // Cek tiap 1 detik
     }
   } catch (err) {
     // Page mungkin ter-refresh setelah generate selesai — itu normal
-    console.log(`     [${err.message.split('\n')[0]}]`);
+    const msg = err.message ? err.message.split('\n')[0] : 'error';
+    if (lastPct >= 0) {
+      console.log(`     ⏹️ Selesai di ${lastPct}%`);
+    }
+    console.log(`     [${msg}]`);
   }
 
   console.log('  ✅ Generate selesai!');
