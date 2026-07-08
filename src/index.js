@@ -456,6 +456,36 @@ function detectTugasQuery(text) {
   return null;
 }
 
+/**
+ * Deteksi apakah pesan berisi perintah TEKO-CAK (tanpa / slash)
+ */
+function detectTekocakQuery(text) {
+  const lower = text.toLowerCase().trim();
+
+  // Cek pola: "tekocak update <NIP>" atau "tekocak update"
+  const updateMatch = lower.match(/^tekocak\s+update(?:\s+(\d+))?$/);
+  if (updateMatch) {
+    return { task: 'update', nip: updateMatch[1] || null };
+  }
+
+  // Cek pola: "tekocak generate" atau "tekocak gen"
+  if (/^tekocak\s+(generate|gen)$/.test(lower)) {
+    return { task: 'generate', nip: null };
+  }
+
+  // Cek pola: "tekocak login"
+  if (/^tekocak\s+login$/.test(lower)) {
+    return { task: 'login', nip: null };
+  }
+
+  // Cek pola: "tekocak" saja
+  if (/^tekocak$/.test(lower)) {
+    return { task: 'all', nip: null };
+  }
+
+  return null;
+}
+
 function formatJadwal(rows, title) {
   if (!rows || rows.length === 0) return { text: null, keyboard: null };
   if (rows.message) return { text: `📭 ${rows.message}`, keyboard: null };
@@ -600,6 +630,20 @@ bot.on('message', async (msg) => {
       } else {
         return await bot.sendMessage(chatId, '📭 Tidak ada tugas.');
       }
+    }
+
+    // Cek apakah ini perintah TEKO-CAK (tanpa /)
+    const tekocakQuery = detectTekocakQuery(text);
+    if (tekocakQuery) {
+      try { await bot.deleteMessage(chatId, waitMsg.message_id); } catch (_) {}
+
+      const labels = {
+        all: 'Semua Task',
+        login: 'Login',
+        generate: 'Generate Laporan',
+        update: tekocakQuery.nip ? `Update 1 Pegawai (NIP: ${tekocakQuery.nip})` : 'Update Semua Pegawai',
+      };
+      return runTekocakTask(chatId, tekocakQuery.task, labels[tekocakQuery.task] || tekocakQuery.task, tekocakQuery.nip);
     }
 
     // Jika bukan query database, lanjutkan ke AI
