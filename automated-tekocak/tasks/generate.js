@@ -36,32 +36,53 @@ async function run(page) {
   console.log('  [3] Klik Generate & tunggu...');
   await page.locator('#modal_generate_instansi button:has-text("Generate")').click();
 
-  let last = '';
-  while (true) {
-    const hasDlg = await page.evaluate(() => document.querySelector('dialog[open]') !== null);
-    if (!hasDlg) break;
-    const txt = await page.evaluate(() => { const d = document.querySelector('dialog[open]'); return d ? d.textContent||'' : ''; });
-    const m = txt.match(/Proses ke : (\d+) dari total (\d+)/);
-    if (m) {
-      const pct = Math.round((parseInt(m[1])/parseInt(m[2]))*100);
-      const p = `${m[1]}/${m[2]} (${pct}%)`;
-      if (p !== last) { console.log(`     Progress: ${p}`); last = p; }
-    }
-    await page.waitForTimeout(5000);
-  }
-  console.log('  ✓ Proses generate selesai, menunggu modal sukses...');
-
-  // Tunggu modal sukses muncul (dialog dengan tombol OK)
+  // ===== PANTAU PROGRESS (Bootstrap modal #pesan_modal) =====
   try {
-    await page.waitForSelector('dialog[open]', { timeout: 15000 });
-    console.log('  ✓ Modal sukses muncul');
-    const ok = page.locator('button:has-text("Ok"), button:has-text("OK")').first();
-    await ok.waitFor({ state: 'visible', timeout: 5000 });
-    await ok.click();
-    console.log('  ✓ Tombol OK diklik');
+    // Tunggu modal progress sebentar
+    await page.waitForSelector('#pesan_modal.in, #pesan_modal.show', { timeout: 8000 });
+    console.log('     [Modal progress muncul]');
+
+    let lastPct = -1;
+    while (true) {
+      const modalVisible = await page.evaluate(() => {
+        try {
+          const m = document.querySelector('#pesan_modal');
+          return m && (m.classList.contains('in') || m.classList.contains('show') || m.style.display === 'block');
+        } catch { return false; }
+      }).catch(() => false);
+      if (!modalVisible) {
+        console.log('     [Modal progress tertutup]');
+        break;
+      }
+
+      const txt = await page.evaluate(() => {
+        try {
+          const s = document.querySelector('#proses-data');
+          return s ? s.textContent || '' : '';
+        } catch { return ''; }
+      }).catch(() => '');
+
+      const m = txt.match(/Proses ke : (\d+) dari total (\d+)/);
+      if (m) {
+        const pct = Math.round((parseInt(m[1])/parseInt(m[2]))*100);
+        if (pct !== lastPct) {
+          const bar = '█'.repeat(Math.round(pct/5)) + '░'.repeat(Math.round((100-pct)/5));
+          console.log(`     ${bar} ${m[1]}/${m[2]} (${pct}%)`);
+          lastPct = pct;
+        }
+        if (pct >= 100) {
+          console.log('  ✅ Generate 100% selesai!');
+          break;
+        }
+      }
+      try { await page.waitForTimeout(2000); } catch { break; }
+    }
   } catch (err) {
-    console.log('  ⚠️ Modal sukses tidak terdeteksi, lanjut: ' + err.message.split('\n')[0]);
+    // Page mungkin ter-refresh setelah generate selesai — itu normal
+    console.log(`     [${err.message.split('\n')[0]}]`);
   }
+
+  console.log('  ✅ Generate selesai!');
 }
 
 // ===== Standalone =====
