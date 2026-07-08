@@ -4,6 +4,7 @@ const { askAI } = require('./services/ai');
 const { getHistory, addMessage, clearHistory } = require('./services/conversation');
 const api = require('./services/apiClient');
 const { startDisposisi, getDisposisiState, clearDisposisiState, saveDisposisi, deleteTugas } = require('./services/disposisi');
+const tekocak = require('./services/tekocak');
 
 // Ambil token dari environment variable
 const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -95,6 +96,7 @@ Saya adalah asisten AI yang siap membantu Anda! 🎉
 • 💬 Chat dengan bahasa alami — ngobrol seperti dengan teman
 • 📅 Cek jadwal rapat hari ini / tanggal tertentu
 • 📋 Cek tugas dan disposisi dari SIJAKA
+• 🤖 Automasi absensi TEKO-CAK (/tekocak)
 • ❓ Jawab pertanyaan seputar kepegawaian
 • 🧠 Didukung AI dari OpenRouter
 
@@ -104,6 +106,7 @@ Saya adalah asisten AI yang siap membantu Anda! 🎉
 /reset — Reset riwayat chat
 /status — Cek status bot
 /info — Info pengguna
+/tekocak — Automasi absensi TEKO-CAK
 
 Coba kirim pesan apa saja, saya akan merespons dengan cerdas! 🚀
   `;
@@ -140,6 +143,7 @@ Kamu bisa ngobrol dengan bahasa alami, tidak perlu perintah kaku.
 /reset — Hapus riwayat chat
 /status — Cek status bot
 /info — Info akun kamu
+/tekocak — Automasi absensi TEKO-CAK ( /tekocak help)
 
 💡 *Tips:* Semakin detail pertanyaanmu, semakin baik jawabannya!
   `;
@@ -244,6 +248,103 @@ ${!isOwner ? `\n📌 *Untuk mengizinkan akses:*\nTambahkan \`${chatId}\` ke \`AL
   `;
 
   bot.sendMessage(chatId, idMessage, { parse_mode: 'Markdown' });
+});
+
+// =============== TEKO-CAK COMMANDS ===============
+
+/**
+ * Helper: jalankan task TEKO-CAK dan kirim hasil ke Telegram
+ */
+async function runTekocakTask(chatId, taskName, label) {
+  // Kirim status awal
+  const statusMsg = await bot.sendMessage(
+    chatId,
+    `⏳ **TEKO-CAK: ${label}**\n\nMemproses... mohon tunggu, ini bisa beberapa menit.`,
+    { parse_mode: 'Markdown' }
+  );
+
+  // Kumpulkan log
+  const logs = [];
+  const onProgress = (msg) => {
+    logs.push(msg);
+  };
+
+  try {
+    const result = await tekocak.runTask(taskName, onProgress);
+    let output = result.output;
+
+    // Kirim hasil
+    try { await bot.deleteMessage(chatId, statusMsg.message_id); } catch (_) {}
+
+    const statusIcon = result.success ? '✅' : '❌';
+    const fullMsg = `${statusIcon} **TEKO-CAK: ${label} — ${result.success ? 'BERHASIL' : 'GAGAL'}**\n\n${output}`;
+
+    // Split pesan jika terlalu panjang (>4096 chars untuk Telegram)
+    const MAX_LEN = 4000;
+    if (fullMsg.length <= MAX_LEN) {
+      await bot.sendMessage(chatId, fullMsg, { parse_mode: 'Markdown' });
+    } else {
+      // Kirim sebagai file jika terlalu panjang
+      const fs = require('fs');
+      const tmpPath = `/tmp/tekocak-${taskName}-${Date.now()}.log`;
+      fs.writeFileSync(tmpPath, output, 'utf-8');
+      await bot.sendMessage(chatId, `${statusIcon} **TEKO-CAK: ${label} — ${result.success ? 'BERHASIL' : 'GAGAL'}**\n\n📄 Output terlalu panjang, dikirim sebagai file.`, { parse_mode: 'Markdown' });
+      await bot.sendDocument(chatId, tmpPath);
+      try { fs.unlinkSync(tmpPath); } catch (_) {}
+    }
+  } catch (err) {
+    try { await bot.deleteMessage(chatId, statusMsg.message_id); } catch (_) {}
+    await bot.sendMessage(
+      chatId,
+      `❌ **TEKO-CAK Error:**\n${err.message}`,
+      { parse_mode: 'Markdown' }
+    );
+  }
+}
+
+// /tekocak — jalankan semua task
+bot.onText(/\/tekocak\b(?: (.+))?/, async (msg, match) => {
+  const chatId = msg.chat.id;
+
+  if (!isAuthorized(chatId)) {
+    return bot.sendMessage(chatId, '⛔ Anda tidak memiliki akses ke bot ini.');
+  }
+
+  const sub = (match[1] || '').trim().toLowerCase();
+
+  if (sub === 'login') {
+    return runTekocakTask(chatId, 'login', 'Login');
+  }
+  if (sub === 'generate' || sub === 'gen') {
+    return runTekocakTask(chatId, 'generate', 'Generate Laporan');
+  }
+  if (sub === 'update' || sub === 'upd') {
+    return runTekocakTask(chatId, 'update', 'Update Pegawai');
+  }
+  if (sub === 'help' || sub === 'h') {
+    const help = [
+      '📋 **Perintah TEKO-CAK:**',
+      '',
+      '`/tekocak` — Jalankan semua task (Login → Generate → Update)',
+      '`/tekocak login` — Login saja',
+      '`/tekocak generate` — Generate laporan absensi',
+      '`/tekocak update` — Update data pegawai',
+      '`/tekocak help` — Bantuan ini',
+      '',
+      '⏱️ Proses bisa memakan waktu beberapa menit tergantung jumlah NIP.',
+    ].join('\n');
+    return bot.sendMessage(chatId, help, { parse_mode: 'Markdown' });
+  }
+  if (sub) {
+    return bot.sendMessage(
+      chatId,
+      `❌ Sub-perintah tidak dikenal: \`${sub}\`\nGunakan \`/tekocak help\` untuk bantuan.`,
+      { parse_mode: 'Markdown' }
+    );
+  }
+
+  // Default: jalankan semua task
+  return runTekocakTask(chatId, 'all', 'Semua Task');
 });
 
 // =============== DIRECT DATABASE QUERY HANDLER ===============
