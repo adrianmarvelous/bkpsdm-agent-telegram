@@ -9,7 +9,7 @@ const { chromium } = require('playwright');
 const { loginThenRun } = require('./_helper');
 const { HALAMAN_PEGAWAI, INSTANSI, DAFTAR_NIP } = require('../config');
 
-async function run(page, browser) {
+async function run(page, browser, nipList = null) {
   console.log('');
   console.log('═══════════════════════════════════════');
   console.log('  TASK 3: UPDATE DATA PEGAWAI');
@@ -21,8 +21,11 @@ async function run(page, browser) {
   await page.locator('select').filter({ hasText: INSTANSI.substring(0, 20) }).selectOption(INSTANSI);
   await page.waitForTimeout(1500);
 
-  for (let i = 0; i < DAFTAR_NIP.length; i++) {
-    const nip = DAFTAR_NIP[i];
+  const nips = nipList || DAFTAR_NIP;
+  console.log(`  Total NIP: ${nips.length}`);
+
+  for (let i = 0; i < nips.length; i++) {
+    const nip = nips[i];
     console.log(`\n  --- Pegawai ${i+1}/${DAFTAR_NIP.length}: ${nip} ---`);
 
     try {

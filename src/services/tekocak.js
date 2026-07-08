@@ -54,9 +54,10 @@ function formatDuration(seconds) {
  *
  * @param {'all'|'login'|'generate'|'update'} taskName
  * @param {function(string)} onProgress - callback tiap baris log (opsional)
+ * @param {string|null} nip - NIP spesifik (untuk update 1 pegawai, opsional)
  * @returns {Promise<{success: boolean, output: string, duration: number}>}
  */
-async function runTask(taskName, onProgress = () => {}) {
+async function runTask(taskName, onProgress = () => {}, nip = null) {
   const startTime = Date.now();
   const lines = [];
   const log = (msg) => { lines.push(msg); onProgress(msg); };
@@ -100,7 +101,11 @@ async function runTask(taskName, onProgress = () => {}) {
   log(`🚀 **TEKO-CAK: ${taskName.toUpperCase()}**`);
   log(`🔗 ${config.TEKOCAK_URL}`);
   log(`📅 Tahun: ${config.TAHUN}`);
-  log(`👥 NIP: ${config.DAFTAR_NIP.length} pegawai`);
+  if (nip) {
+    log(`🔢 NIP: ${nip}`);
+  } else {
+    log(`👥 NIP: ${config.DAFTAR_NIP.length} pegawai`);
+  }
   if (config.HEADLESS) log('🕶️ Mode: Headless');
   log('');
 
@@ -138,8 +143,9 @@ async function runTask(taskName, onProgress = () => {}) {
 
     // ===== UPDATE PEGAWAI =====
     if (taskName === 'all' || taskName === 'update') {
-      log(`👤 **Update ${config.DAFTAR_NIP.length} Pegawai...**`);
-      await updatePegawai.run(page, browser);
+      const nips = nip ? [nip] : config.DAFTAR_NIP;
+      log(`👤 **Update ${nips.length} Pegawai...**`);
+      await updatePegawai.run(page, browser, nips);
       log('✅ **Update pegawai selesai!**\n');
     }
 

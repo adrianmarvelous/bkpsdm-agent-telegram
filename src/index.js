@@ -255,11 +255,11 @@ ${!isOwner ? `\n📌 *Untuk mengizinkan akses:*\nTambahkan \`${chatId}\` ke \`AL
 /**
  * Helper: jalankan task TEKO-CAK dan kirim hasil ke Telegram
  */
-async function runTekocakTask(chatId, taskName, label) {
+async function runTekocakTask(chatId, taskName, label, nip = null) {
   // Kirim status awal
   const statusMsg = await bot.sendMessage(
     chatId,
-    `⏳ **TEKO-CAK: ${label}**\n\nMemproses... mohon tunggu, ini bisa beberapa menit.`,
+    `⏳ **TEKO-CAK: ${label}**${nip ? ` (NIP: ${nip})` : ''}\n\nMemproses... mohon tunggu, ini bisa beberapa menit.`,
     { parse_mode: 'Markdown' }
   );
 
@@ -270,7 +270,7 @@ async function runTekocakTask(chatId, taskName, label) {
   };
 
   try {
-    const result = await tekocak.runTask(taskName, onProgress);
+    const result = await tekocak.runTask(taskName, onProgress, nip);
     let output = result.output;
 
     // Kirim hasil
@@ -312,26 +312,37 @@ bot.onText(/\/tekocak\b(?: (.+))?/, async (msg, match) => {
 
   const sub = (match[1] || '').trim().toLowerCase();
 
-  if (sub === 'login') {
+  // Pisahkan sub-perintah dan NIP (jika ada)
+  const parts = sub.split(/\s+/);
+  const cmd = parts[0];
+  const nip = parts.length > 1 ? parts[1] : null;
+
+  if (cmd === 'login') {
     return runTekocakTask(chatId, 'login', 'Login');
   }
-  if (sub === 'generate' || sub === 'gen') {
+  if (cmd === 'generate' || cmd === 'gen') {
     return runTekocakTask(chatId, 'generate', 'Generate Laporan');
   }
-  if (sub === 'update' || sub === 'upd') {
-    return runTekocakTask(chatId, 'update', 'Update Pegawai');
+  if (cmd === 'update' || cmd === 'upd') {
+    if (nip) {
+      return runTekocakTask(chatId, 'update', `Update 1 Pegawai (NIP: ${nip})`, nip);
+    }
+    return runTekocakTask(chatId, 'update', 'Update Semua Pegawai');
   }
-  if (sub === 'help' || sub === 'h') {
+  if (cmd === 'help' || cmd === 'h') {
     const help = [
       '📋 **Perintah TEKO-CAK:**',
       '',
       '`/tekocak` — Jalankan semua task (Login → Generate → Update)',
       '`/tekocak login` — Login saja',
       '`/tekocak generate` — Generate laporan absensi',
-      '`/tekocak update` — Update data pegawai',
+      '`/tekocak update` — Update semua pegawai (66 NIP)',
+      '`/tekocak update <NIP>` — Update 1 pegawai spesifik',
       '`/tekocak help` — Bantuan ini',
       '',
-      '⏱️ Proses bisa memakan waktu beberapa menit tergantung jumlah NIP.',
+      '⏱️ Update 66 NIP butuh beberapa menit. Untuk 1 NIP lebih cepat.',
+      '',
+      '💡 *Contoh:* `/tekocak update 196910171993032006`',
     ].join('\n');
     return bot.sendMessage(chatId, help, { parse_mode: 'Markdown' });
   }
