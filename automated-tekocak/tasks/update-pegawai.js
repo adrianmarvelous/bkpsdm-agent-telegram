@@ -70,10 +70,23 @@ async function run(page, browser, nipList = null) {
         await page.goto(HALAMAN_PEGAWAI, { waitUntil: 'networkidle', timeout: 30000 }).catch(() => {});
       }
     } catch (err) {
-      console.log(`      ⚠️  Gagal: ${err.message.split('\n')[0]}`);
+      const errMsg = err.message.split('\n')[0];
+      console.log(`      ⚠️  Gagal: ${errMsg}`);
       console.log('      ➜ Skip');
-      // Pull page back
-      try { await page.goto(HALAMAN_PEGAWAI, { timeout: 30000 }).catch(() => {}); } catch { /* ok */ }
+
+      // Jika page sudah closed, buat page baru dari browser
+      if (errMsg.includes('closed')) {
+        try {
+          page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+          await page.goto(HALAMAN_PEGAWAI, { waitUntil: 'networkidle', timeout: 30000 }).catch(() => {});
+          await page.locator('select').filter({ hasText: INSTANSI.substring(0, 20) }).selectOption(INSTANSI);
+          await page.waitForTimeout(1500);
+          console.log('      ↻ Page baru dibuat & login ulang.');
+        } catch { /* ok */ }
+      } else {
+        // Pull page back
+        try { await page.goto(HALAMAN_PEGAWAI, { timeout: 30000 }).catch(() => {}); } catch { /* ok */ }
+      }
     }
   }
 }
