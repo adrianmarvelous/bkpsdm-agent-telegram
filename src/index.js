@@ -360,23 +360,48 @@ bot.onText(/\/tekocak\b(?: (.+))?/, async (msg, match) => {
 
 // =============== BBM NON-FOSIL COMMAND ===============
 
-// /bbm — lihat data BBM Non-Fosil hari ini
-bot.onText(/\/bbm/, async (msg) => {
+// /bbm — lihat data BBM Non-Fosil (hari ini atau tanggal tertentu)
+bot.onText(/\/bbm(?:\s+(.+))?/, async (msg, match) => {
   const chatId = msg.chat.id;
   if (!isAuthorized(chatId)) {
     return bot.sendMessage(chatId, '⛔ Anda tidak memiliki akses ke bot ini.');
   }
 
+  const dateInput = (match[1] || '').trim();
+
   try {
     const waitMsg = await bot.sendMessage(chatId, '⏳ Mengambil data BBM Non-Fosil...');
-    const data = await api.getBbmNonFosilHariIni();
-    try { await bot.deleteMessage(chatId, waitMsg.message_id); } catch (_) {}
 
-    const formatted = formatBbm(data, 'BBM Non-Fosil Hari Ini 🛢️');
-    if (formatted.text) {
-      await bot.sendMessage(chatId, formatted.text, { parse_mode: 'HTML' });
+    let data;
+    if (dateInput) {
+      // Coba parse tanggal: support DD/MM/YYYY atau teks Indonesia
+      const parsed = parseIndonesianDate(dateInput); // returns YYYY-MM-DD
+      if (parsed) {
+        // Convert YYYY-MM-DD ke DD/MM/YYYY
+        const [y, m, d] = parsed.split('-');
+        const tanggalDmy = `${d}/${m}/${y}`;
+        data = await api.getBbmNonFosilByTanggal(tanggalDmy);
+      } else {
+        // Coba langsung DD/MM/YYYY
+        data = await api.getBbmNonFosilByTanggal(dateInput);
+      }
+      try { await bot.deleteMessage(chatId, waitMsg.message_id); } catch (_) {}
+      const formatted = formatBbm(data, `BBM Non-Fosil ${dateInput} 🛢️`);
+      if (formatted.text) {
+        await bot.sendMessage(chatId, formatted.text, { parse_mode: 'HTML' });
+      } else {
+        await bot.sendMessage(chatId, '📭 Tidak ada data BBM Non-Fosil.');
+      }
     } else {
-      await bot.sendMessage(chatId, '📭 Tidak ada data BBM Non-Fosil.');
+      // Hari ini
+      data = await api.getBbmNonFosilHariIni();
+      try { await bot.deleteMessage(chatId, waitMsg.message_id); } catch (_) {}
+      const formatted = formatBbm(data, 'BBM Non-Fosil Hari Ini 🛢️');
+      if (formatted.text) {
+        await bot.sendMessage(chatId, formatted.text, { parse_mode: 'HTML' });
+      } else {
+        await bot.sendMessage(chatId, '📭 Tidak ada data BBM Non-Fosil.');
+      }
     }
   } catch (err) {
     await bot.sendMessage(chatId, `❌ Error: ${err.message}`);
@@ -389,7 +414,7 @@ bot.onText(/\/bbm/, async (msg) => {
  * Deteksi apakah pesan berisi permintaan jadwal rapat
  * Jika ya, langsung query database tanpa lewat AI
  */
-const { executeTool } = require('./services/dbTools');
+const { executeTool, parseIndonesianDate } = require('./services/dbTools');
 
 const JADWAL_PATTERNS = [
   /(jadwal|rapat|agenda|acara)\s+(hari\s*ini|sekarang)/i,
@@ -516,6 +541,16 @@ function detectTekocakQuery(text) {
  */
 function detectBbmQuery(text) {
   const lower = text.toLowerCase().trim();
+
+  // BBM + tanggal (format: DD/MM/YYYY atau teks Indonesia)
+  const bbmWithDate = lower.match(/^bbm(?:\s+non.?fosil)?(?:\s+tanggal)?\s+(.+)/);
+  if (bbmWithDate) {
+    const dateStr = bbmWithDate[1].trim();
+    // Cek apakah itu format tanggal
+    if (/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(dateStr) || /\d{1,2}\s+[a-z]+/.test(dateStr)) {
+      return { tool: 'get_bbm_non_fosil_by_tanggal', args: { tanggal: dateStr } };
+    }
+  }
 
   if (/^(bbm|bbm non.?fosil|bahan bakar).*(hari.ini|sekarang)/i.test(lower)) {
     return { tool: 'get_bbm_non_fosil_hari_ini', args: {} };

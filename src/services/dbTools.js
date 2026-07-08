@@ -189,7 +189,15 @@ const DB_TOOLS = [
       required: ['tanggal'],
     },
     handler: async (args) => {
-      return await api.getBbmNonFosilByTanggal(args.tanggal);
+      // Deteksi format tanggal: parseIndonesianDate returns YYYY-MM-DD
+      // Tapi API BBM expects DD/MM/YYYY
+      let tanggal = args.tanggal;
+      const parsed = parseIndonesianDate(tanggal);
+      if (parsed) {
+        const [y, m, d] = parsed.split('-');
+        tanggal = `${d}/${m}/${y}`;
+      }
+      return await api.getBbmNonFosilByTanggal(tanggal);
     },
   },
 ];
@@ -215,4 +223,4 @@ async function executeTool(name, args) {
   return await tool.handler(args || {});
 }
 
-module.exports = { getToolDefinitions, executeTool, DB_TOOLS };
+module.exports = { getToolDefinitions, executeTool, DB_TOOLS, parseIndonesianDate };
