@@ -1,0 +1,17 @@
+{
+  "name": "automated-tekocak",
+  "version": "1.0.0",
+  "description": "Automasi login dan absensi TEKO-CAK Surabaya",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "login": "node tasks/login.js",
+    "generate": "node tasks/generate.js",
+    "update": "node tasks/update-pegawai.js"
+  },
+  "dependencies": {
+    "dotenv": "^17.4.2",
+    "playwright": "^1.52.0",
+    "xlsx": "^0.18.5"
+  }
+}

@@ -1,0 +1,13 @@
+# Dependency
+node_modules/
+
+# Environment variables (sensitive)
+.env
+
+# Plain CSV (jika tidak sengaja teregenerasi)
+# File terenkripsi (.csv.enc) TETAP di-commit — aman
+master-pegawai.csv
+
+# OS files
+Thumbs.db
+.DS_Store
