@@ -51,13 +51,14 @@ async function saveDisposisi(chatId, namaList) {
   // Parse nama (pisahkan dengan koma)
   const names = namaList.split(',').map(n => n.trim()).filter(n => n);
 
-  // Kirim ke API
+  // Kirim ke API — link_esurat optional, bisa ditambahkan dari data jadwal jika ada
   const result = await api.createTugas({
     tugas: tugasText,
     tanggal: tanggalRapat,
     jam: jamRapat,
     disposisi_ke: 'Telegram Bot',
     pegawai: names,
+    link_esurat: jadwalData.link_esurat || undefined,
   });
 
   // Bersihkan state

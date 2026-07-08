@@ -18,7 +18,7 @@ const openai = new OpenAI({
  * Model AI yang digunakan
  * Bisa dikonfigurasi via .env, default menggunakan model gratis yang bagus
  */
-const MODEL = process.env.OPENROUTER_MODEL || 'meta-llama/llama-3.1-8b-instruct:free';
+const MODEL = process.env.OPENROUTER_MODEL || 'cohere/north-mini-code:free';
 
 /**
  * System prompt untuk memberikan konteks dan kepribadian pada AI

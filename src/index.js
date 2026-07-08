@@ -171,7 +171,7 @@ bot.onText(/\/status/, async (msg) => {
 
   // Cek status AI
   const aiConfigured = process.env.OPENROUTER_API_KEY ? '✅ Terkonfigurasi' : '❌ Belum diatur';
-  const aiModel = process.env.OPENROUTER_MODEL || 'meta-llama/llama-3.1-8b-instruct:free';
+  const aiModel = process.env.OPENROUTER_MODEL || 'cohere/north-mini-code:free';
 
   // Cek status semua database via API (real-time)
   let dbStatusText = '⚠️ Tidak bisa hubungi API backend';
@@ -348,19 +348,20 @@ function formatJadwal(rows, title) {
   if (!rows || rows.length === 0) return { text: null, keyboard: null };
   if (rows.message) return { text: `📭 ${rows.message}`, keyboard: null };
 
-  let msg = `📅 *${title}*\n\n`;
+  let msg = `📅 <b>${title}</b>\n\n`;
   const keyboard = [];
 
   rows.forEach((r, i) => {
     const waktu = r.pukul_mulai ? r.pukul_mulai.slice(0, 5) : '-';
-    msg += `${i + 1}. *${r.nama_acara}*\n`;
+    msg += `${i + 1}. <b>${r.nama_acara}</b>\n`;
     msg += `   ⏰ ${waktu}`;
     if (r.tempat) msg += ` | 📍 ${r.tempat}`;
+    if (r.link_esurat) msg += `\n   🔗 ${r.link_esurat}`;
     msg += '\n\n';
     keyboard.push([{ text: `📌 Disposisi #${i + 1}`, callback_data: `disposisi_${r.id}` }]);
   });
 
-  msg += '_Klik tombol di bawah untuk disposisi rapat_';
+  msg += '<i>Klik tombol di bawah untuk disposisi rapat</i>';
   return { text: msg, keyboard };
 }
 
@@ -369,7 +370,7 @@ function formatTugas(rows, title) {
   if (rows.message) return { text: `📭 ${rows.message}`, keyboard: null };
   if (rows.error) return { text: `⚠️ ${rows.message}`, keyboard: null };
 
-  let msg = `📋 *${title}*\n\n`;
+  let msg = `📋 <b>${title}</b>\n\n`;
   const keyboard = [];
 
   rows.forEach((r, i) => {
@@ -381,11 +382,12 @@ function formatTugas(rows, title) {
     msg += `   📅 ${tgl} | ⏰ ${waktu}`;
     if (r.disposisi_ke) msg += ` | 👤 ${r.disposisi_ke}`;
     if (r.pegawai) msg += `\n   👥 ${r.pegawai}`;
+    if (r.link_esurat) msg += `\n   🔗 ${r.link_esurat}`;
     msg += '\n\n';
     keyboard.push([{ text: `🗑 Hapus #${i + 1}`, callback_data: `hapus_tugas_${r.id}` }]);
   });
 
-  msg += '_Klik 🗑 Hapus untuk menghapus tugas_';
+  msg += '<i>Klik 🗑 Hapus untuk menghapus tugas</i>';
   return { text: msg, keyboard };
 }
 
@@ -454,7 +456,7 @@ bot.on('message', async (msg) => {
       try { await bot.deleteMessage(chatId, waitMsg.message_id); } catch (_) {}
 
       if (formatted.text) {
-        const opt = { parse_mode: 'Markdown' };
+        const opt = { parse_mode: 'HTML' };
         if (formatted.keyboard && formatted.keyboard.length > 0) {
           opt.reply_markup = { inline_keyboard: formatted.keyboard };
         }
@@ -478,7 +480,7 @@ bot.on('message', async (msg) => {
       try { await bot.deleteMessage(chatId, waitMsg.message_id); } catch (_) {}
 
       if (formatted.text) {
-        const opt = { parse_mode: 'Markdown' };
+        const opt = { parse_mode: 'HTML' };
         if (formatted.keyboard && formatted.keyboard.length > 0) {
           opt.reply_markup = { inline_keyboard: formatted.keyboard };
         }
