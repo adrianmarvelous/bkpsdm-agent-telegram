@@ -122,7 +122,8 @@ async function runTask(taskName, onProgress = () => {}, nip = null) {
   try {
     browser = await chromium.launch({
       headless: config.HEADLESS,
-      args: ['--no-sandbox', '--disable-setuid-sandbox'],
+      channel: 'chrome',
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
     });
     const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
 
@@ -155,8 +156,38 @@ async function runTask(taskName, onProgress = () => {}, nip = null) {
     if (taskName === 'all' || taskName === 'update') {
       const nips = nip ? [nip] : config.DAFTAR_NIP;
       log(`👤 **Update ${nips.length} Pegawai...**`);
-      await updatePegawai.run(page, browser, nips);
-      log('✅ **Update pegawai selesai!**\n');
+
+      let failedNips = await updatePegawai.run(page, browser, nips);
+      let retryCount = 0;
+
+      while (failedNips.length > 0 && retryCount < 2) {
+        retryCount++;
+        log(`\n⚠️ **Retry #${retryCount} — ${failedNips.length} pegawai gagal, coba lagi...**`);
+        // Browser context mungkin crash, buat page baru
+        try {
+          page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+          await page.goto(config.HALAMAN_PEGAWAI, { waitUntil: 'load', timeout: 60000 });
+        } catch {
+          // Kalau browser juga crash, bikin baru
+          await browser.close();
+          browser = await chromium.launch({
+            headless: config.HEADLESS,
+            channel: 'chrome',
+            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
+          });
+          page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+        }
+        // Login ulang karena page baru
+        await login.run(page);
+        failedNips = await updatePegawai.run(page, browser, failedNips);
+      }
+
+      if (failedNips.length > 0) {
+        log(`\n⚠️ **${failedNips.length} pegawai tetap gagal setelah ${retryCount}× retry**`);
+        log(`   NIP: ${failedNips.join(', ')}`);
+      } else {
+        log('✅ **Update pegawai selesai!**');
+      }
     }
 
     const duration = (Date.now() - startTime) / 1000;

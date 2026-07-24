@@ -200,6 +200,37 @@ const DB_TOOLS = [
       return await api.getBbmNonFosilByTanggal(tanggal);
     },
   },
+  // =============== TOOLS ABSENSI (CSV) ===============
+  {
+    name: 'get_absensi_today',
+    description: 'Mendapatkan data absensi TEKO-CAK hari ini untuk ALL pegawai dari CSV',
+    parameters: {
+      type: 'object',
+      properties: {},
+    },
+    handler: async () => {
+      return await api.getAbsensiHariIni();
+    },
+  },
+  {
+    name: 'get_absensi_by_tanggal',
+    description: 'Mendapatkan data absensi TEKO-CAK berdasarkan tanggal tertentu untuk ALL pegawai dari CSV',
+    parameters: {
+      type: 'object',
+      properties: {
+        tanggal: {
+          type: 'string',
+          description: 'Tanggal dalam format YYYY-MM-DD. Contoh: "2026-07-14"',
+        },
+      },
+      required: ['tanggal'],
+    },
+    handler: async (args) => {
+      const parsed = parseIndonesianDate(args.tanggal);
+      const tanggal = parsed || args.tanggal;
+      return await api.getAbsensiByTanggal(tanggal);
+    },
+  },
 ];
 
 /** Mendapatkan definisi tools untuk function calling AI */

@@ -13,7 +13,7 @@
 const BASE_URL = process.env.API_BASE_URL || 'https://bkpsdm.surabaya.go.id/api/ai-agent';
 const API_USERNAME = process.env.API_USERNAME;
 const API_PASSWORD = process.env.API_PASSWORD;
-const TIMEOUT_MS = 30000;
+const TIMEOUT_MS = 120000;
 
 // Token cache
 let authToken = null;
@@ -214,6 +214,26 @@ async function getBbmNonFosilByTanggal(tanggal) {
   return await request('GET', `/bbm-non-fosil/tanggal.php?tanggal=${encodeURIComponent(tanggal)}`);
 }
 
+// ===================== ABSENSI (CSV) =====================
+
+/**
+ * GET /api/ai-agent/absensi/hari-ini.php
+ * Mendapatkan data absensi hari ini untuk ALL pegawai dari CSV
+ * Response: { success, tanggal, ringkasan, hadir, absen }
+ */
+async function getAbsensiHariIni() {
+  return await request('GET', '/absensi/hari-ini.php');
+}
+
+/**
+ * GET /api/ai-agent/absensi/hari-ini.php?tanggal=YYYY-MM-DD
+ * Mendapatkan data absensi by tanggal untuk ALL pegawai dari CSV
+ * Response: { success, tanggal, ringkasan, hadir, absen }
+ */
+async function getAbsensiByTanggal(tanggal) {
+  return await request('GET', `/absensi/hari-ini.php?tanggal=${encodeURIComponent(tanggal)}`);
+}
+
 module.exports = {
   // Jadwal
   getJadwalHariIni,
@@ -230,6 +250,9 @@ module.exports = {
   // BBM
   getBbmNonFosilHariIni,
   getBbmNonFosilByTanggal,
+  // Absensi
+  getAbsensiHariIni,
+  getAbsensiByTanggal,
   // Health
   healthCheck,
 };

@@ -1,10 +1,13 @@
 require('dotenv').config();
 const { TelegramBot } = require('node-telegram-bot-api');
-const { askAI } = require('./services/ai');
-const { getHistory, addMessage, clearHistory } = require('./services/conversation');
-const api = require('./services/apiClient');
-const { startDisposisi, getDisposisiState, clearDisposisiState, saveDisposisi, deleteTugas } = require('./services/disposisi');
-const tekocak = require('./services/tekocak');
+const { askAI } = require('../services/ai');
+const { getHistory, addMessage, clearHistory } = require('../services/conversation');
+const api = require('../services/apiClient');
+const { startDisposisi, getDisposisiState, clearDisposisiState, saveDisposisi, deleteTugas } = require('../services/disposisi');
+const tekocak = require('../services/tekocak');
+const fs = require('fs');
+const { generateAbsensiPdf } = require('../services/pdfGenerator');
+const { executeTool, parseIndonesianDate } = require('../services/dbTools');
 
 // Ambil token dari environment variable
 const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -96,22 +99,24 @@ Saya adalah asisten AI yang siap membantu Anda! 🎉
 • 💬 Chat dengan bahasa alami — ngobrol seperti dengan teman
 • 📅 Cek jadwal rapat hari ini / tanggal tertentu
 • 📋 Cek tugas dan disposisi dari SIJAKA
-• 🤖 Automasi absensi TEKO-CAK (/tekocak)
-• ❓ Jawab pertanyaan seputar kepegawaian
+• 🤖 Automasi absensi TEKO-CAK
+• 📊 Cek absensi & BBM Non-Fosil
 • 🧠 Didukung AI dari OpenRouter
 
-📋 *Perintah:*
-/start — Mulai ulang percakapan
-/help — Bantuan & tips
-/reset — Reset riwayat chat
-/status — Cek status bot
-/info — Info pengguna
-/tekocak — Automasi absensi TEKO-CAK
-
-Coba kirim pesan apa saja, saya akan merespons dengan cerdas! 🚀
+👇 *Pilih menu di bawah atau ketik perintah langsung:*
   `;
 
-  bot.sendMessage(chatId, welcomeMessage, { parse_mode: 'Markdown' });
+  bot.sendMessage(chatId, welcomeMessage, {
+    parse_mode: 'Markdown',
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: '📅 Jadwal Rapat', callback_data: 'menu_jadwal' }, { text: '📋 Tugas & Disposisi', callback_data: 'menu_tugas' }],
+        [{ text: '🤖 TEKO-CAK', callback_data: 'menu_tekocak' }, { text: '📊 Absensi', callback_data: 'menu_absensi' }],
+        [{ text: '🛢️ BBM Non-Fosil', callback_data: 'menu_bbm' }, { text: 'ℹ️ Status', callback_data: 'menu_status' }],
+        [{ text: '❓ Bantuan', callback_data: 'menu_help' }],
+      ]
+    }
+  });
 });
 
 // Handler untuk /help
@@ -144,6 +149,7 @@ Kamu bisa ngobrol dengan bahasa alami, tidak perlu perintah kaku.
 /status — Cek status bot
 /info — Info akun kamu
 /tekocak — Automasi absensi TEKO-CAK ( /tekocak help)
+/absensi — Cek absensi TEKO-CAK hari ini
 
 💡 *Tips:* Semakin detail pertanyaanmu, semakin baik jawabannya!
   `;
@@ -358,6 +364,79 @@ bot.onText(/\/tekocak\b(?: (.+))?/, async (msg, match) => {
   return runTekocakTask(chatId, 'all', 'Semua Task');
 });
 
+// =============== ABSENSI COMMAND ===============
+
+/**
+ * Helper: kirim absensi (teks atau PDF tergantung jumlah data)
+ */
+async function sendAbsensiResponse(chatId, data, label = 'Absensi TEKO-CAK Hari Ini') {
+  const r = data?.ringkasan;
+  const totalPegawai = r?.total_pegawai || (r?.total) || 0;
+
+  // Jika data banyak (>15 pegawai), kirim sebagai PDF
+  if (totalPegawai > 15) {
+    const pdfPath = await generateAbsensiPdf(data);
+    const hadir = r?.normal || r?.hadir || 0;
+    const anomali = r?.anomali || r?.absen || 0;
+    const caption = `📋 <b>${label}</b>\n📅 ${data.tanggal || '-'}\n👥 ${totalPegawai} pegawai | ✅ Normal ${hadir}${anomali ? ' | ⚠️ Anomali ' + anomali : ''}`;
+    await bot.sendDocument(chatId, pdfPath, { caption, parse_mode: 'HTML' });
+    try { fs.unlinkSync(pdfPath); } catch (_) {}
+    return;
+  }
+
+  // Jika sedikit, kirim teks biasa
+  const formatted = formatAbsensi(data, label);
+  if (formatted.text) {
+    await bot.sendMessage(chatId, formatted.text, { parse_mode: 'HTML' });
+  } else {
+    await bot.sendMessage(chatId, '📭 Tidak ada data absensi.');
+  }
+}
+
+// /absensi — lihat absensi TEKO-CAK (hari ini atau tanggal tertentu)
+// /absensi                   → hari ini
+// /absensi 2026-07-13        → tanggal tertentu
+// /absensi 13 juli 2026      → teks Indonesia
+bot.onText(/\/absensi(?:\s+(.+))?/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  if (!isAuthorized(chatId)) {
+    return bot.sendMessage(chatId, '⛔ Anda tidak memiliki akses ke bot ini.');
+  }
+
+  const dateInput = (match[1] || '').trim();
+
+  try {
+    const waitMsg = await bot.sendMessage(chatId, '⏳ Mengambil data absensi TEKO-CAK...');
+
+    let data;
+    let label;
+
+    if (dateInput) {
+      // Parse tanggal — buang kata "tanggal" jika ada
+      const cleanInput = dateInput.replace(/^tanggal\s+/i, '');
+      const parsed = parseIndonesianDate(cleanInput); // returns YYYY-MM-DD
+      if (parsed) {
+        data = await api.getAbsensiByTanggal(parsed);
+        label = `Absensi TEKO-CAK ${parsed}`;
+      } else {
+        // Coba langsung YYYY-MM-DD
+        data = await api.getAbsensiByTanggal(cleanInput);
+        label = `Absensi TEKO-CAK ${cleanInput}`;
+      }
+    } else {
+      data = await api.getAbsensiHariIni();
+      label = 'Absensi TEKO-CAK Hari Ini';
+    }
+
+    try { await bot.deleteMessage(chatId, waitMsg.message_id); } catch (_) {}
+    await sendAbsensiResponse(chatId, data, label);
+
+  } catch (err) {
+    try { await bot.deleteMessage(chatId, waitMsg.message_id); } catch (_) {}
+    await bot.sendMessage(chatId, `❌ Error: ${err.message}`);
+  }
+});
+
 // =============== BBM NON-FOSIL COMMAND ===============
 
 // /bbm — lihat data BBM Non-Fosil (hari ini atau tanggal tertentu)
@@ -370,7 +449,7 @@ bot.onText(/\/bbm(?:\s+(.+))?/, async (msg, match) => {
   const dateInput = (match[1] || '').trim();
 
   try {
-    const waitMsg = await bot.sendMessage(chatId, '⏳ Mengambil data BBM Non-Fosil...');
+    const waitMsg = await bot.sendMessage(chatId, '⏳ Mengambil data BBM Non-Fosil... (mungkin butuh beberapa saat)');
 
     let data;
     if (dateInput) {
@@ -414,8 +493,6 @@ bot.onText(/\/bbm(?:\s+(.+))?/, async (msg, match) => {
  * Deteksi apakah pesan berisi permintaan jadwal rapat
  * Jika ya, langsung query database tanpa lewat AI
  */
-const { executeTool, parseIndonesianDate } = require('./services/dbTools');
-
 const JADWAL_PATTERNS = [
   /(jadwal|rapat|agenda|acara)\s+(hari\s*ini|sekarang)/i,
   /(jadwal|rapat|agenda|acara)\s+(minggu\s*ini|bulan\s*ini)/i,
@@ -642,6 +719,121 @@ function formatBbm(response, title) {
   return { text: null, keyboard: null };
 }
 
+// =============== ABSENSI DETECTION & FORMATTER ===============
+
+/**
+ * Deteksi apakah pesan berisi permintaan absensi TEKO-CAK
+ */
+function detectAbsensiQuery(text) {
+  const lower = text.toLowerCase().trim();
+
+  // Pola absensi + tanggal (format: YYYY-MM-DD atau teks Indonesia)
+  const absenWithDate = lower.match(/^(absensi|absen|kehadiran)\s+(.+)/);
+  if (absenWithDate) {
+    let dateStr = absenWithDate[2].trim();
+    // Hapus kata "tanggal " di depan jika ada (misal: "absensi tanggal 13 juli")
+    dateStr = dateStr.replace(/^tanggal\s+/i, '');
+    // Cek apakah itu format tanggal
+    if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr) || /\d{1,2}\s+[a-z]+/.test(dateStr)) {
+      return { tool: 'get_absensi_by_tanggal', args: { tanggal: dateStr } };
+    }
+  }
+
+  // Pola: "absensi hari ini", "absen hari ini", "absensi now"
+  if (/(absensi|absen|kehadiran)\s*(hari\s*ini|sekarang|today)/i.test(lower)) {
+    return { tool: 'get_absensi_today', args: {} };
+  }
+  if (/^(absensi|absen|kehadiran)$/.test(lower)) {
+    return { tool: 'get_absensi_today', args: {} };
+  }
+  if (/(tampilkan|lihat|cek|munculkan)\s*(absensi|absen|kehadiran)/i.test(lower)) {
+    return { tool: 'get_absensi_today', args: {} };
+  }
+
+  // Pola: "absensi tanggal 13 juli" atau "absensi 13 juli 2026"
+  const absenTgl = lower.match(/^(absensi|absen|kehadiran)\s+(tanggal\s+)?(\d{1,2}\s+[a-z]+(?:\s+\d{4})?)$/);
+  if (absenTgl) {
+    return { tool: 'get_absensi_by_tanggal', args: { tanggal: absenTgl[3] } };
+  }
+
+  // Pola: "absensi 2026-07-13" (format YYYY-MM-DD)
+  const absenIso = lower.match(/^(absensi|absen|kehadiran)\s+(\d{4}-\d{2}-\d{2})$/);
+  if (absenIso) {
+    return { tool: 'get_absensi_by_tanggal', args: { tanggal: absenIso[2] } };
+  }
+
+  return null;
+}
+
+/**
+ * Format data absensi ke HTML untuk Telegram
+ * Response API (format baru):
+ * {
+ *   success, tanggal,
+ *   ringkasan: { total_pegawai, normal, anomali, rincian_masalah },
+ *   anomali: [{ nip, nama, jam_masuk, jam_pulang, keterangan, masalah: [] }]
+ * }
+ * Normal pegawai hanya ada hitungan di ringkasan.normal (tanpa detail array)
+ */
+function formatAbsensi(response, title = 'Absensi TEKO-CAK Hari Ini') {
+  if (!response) return { text: null, keyboard: null };
+
+  // Jika error
+  if (response.success === false) {
+    return { text: `📭 ${response.message || 'Tidak ada data absensi'}`, keyboard: null };
+  }
+
+  let msg = `📋 <b>${title}</b>\n`;
+  if (response.tanggal) msg += `📅 ${response.tanggal}\n`;
+
+  // Ringkasan (format baru: total_pegawai, normal, anomali)
+  if (response.ringkasan) {
+    const r = response.ringkasan;
+    msg += `👥 Total: ${r.total_pegawai || 0} pegawai\n`;
+    msg += `✅ Normal: ${r.normal || 0} pegawai\n`;
+    msg += `⚠️ Anomali: ${r.anomali || 0} pegawai\n`;
+    if (r.rincian_masalah) {
+      const rm = r.rincian_masalah;
+      const parts = [];
+      if (rm.jam_sama) parts.push(`🕐 jam sama ${rm.jam_sama}`);
+      if (rm.keterangan_M) parts.push(`📌 Mangkir ${rm.keterangan_M}`);
+      if (rm.keterangan_bintang) parts.push(`* ${rm.keterangan_bintang}`);
+      if (rm.tanpa_jam) parts.push(`⏺ tanpa jam ${rm.tanpa_jam}`);
+      if (parts.length) msg += `📊 ${parts.join(' | ')}\n`;
+    }
+    msg += `\n`;
+  }
+
+  // Daftar anomali (format baru — array anomali dengan detail masalah)
+  if (response.anomali && response.anomali.length > 0) {
+    msg += `<u>⚠️ ANOMALI (${response.anomali.length})</u>\n\n`;
+    const MAX_SHOW = 15;
+    const list = response.anomali.slice(0, MAX_SHOW);
+    list.forEach((r, i) => {
+      const label = r.keterangan === 'H' ? 'Hadir' : r.keterangan === 'M' ? 'Mangkir' : r.keterangan || '';
+      msg += `<b>${i + 1}. ${r.nama || '-'}</b>\n`;
+      msg += `   🆔 NIP: ${r.nip || '-'}\n`;
+      if (r.jam_masuk) msg += `   🟢 Masuk: ${r.jam_masuk}\n`;
+      if (r.jam_pulang) msg += `   🔴 Pulang: ${r.jam_pulang}\n`;
+      if (label) msg += `   📌 ${label}\n`;
+      if (r.masalah && r.masalah.length > 0) {
+        r.masalah.forEach(m => msg += `   ⚡ ${m}\n`);
+      }
+      msg += '\n';
+    });
+    const remaining = response.anomali.length - MAX_SHOW;
+    if (remaining > 0) {
+      msg += `... dan ${remaining} anomali lainnya\n\n`;
+    }
+  }
+
+  if (msg.length <= 50) {
+    return { text: null, keyboard: null };
+  }
+
+  return { text: msg, keyboard: null };
+}
+
 // =============== TEXT MESSAGE HANDLER (Natural Language via AI) ===============
 
 // Kirim indikator "sedang mengetik" agar pengguna tahu bot sedang memproses
@@ -776,6 +968,26 @@ bot.on('message', async (msg) => {
       }
     }
 
+    // Cek apakah ini query absensi TEKO-CAK
+    const absensiQuery = detectAbsensiQuery(text);
+    if (absensiQuery) {
+      try { await bot.deleteMessage(chatId, waitMsg.message_id); } catch (_) {}
+      try {
+        const result = await executeTool(absensiQuery.tool, absensiQuery.args);
+        const label = absensiQuery.tool === 'get_absensi_by_tanggal'
+          ? `Absensi TEKO-CAK ${result.tanggal || absensiQuery.args.tanggal || ''}`
+          : 'Absensi TEKO-CAK Hari Ini';
+        await sendAbsensiResponse(chatId, result, label);
+        return;
+      } catch (err) {
+        return await bot.sendMessage(
+          chatId,
+          `❌ *Absensi Error:* ${err.message}`,
+          { parse_mode: 'Markdown' }
+        );
+      }
+    }
+
     // Jika bukan query database, lanjutkan ke AI
     // Simpan pesan user ke riwayat
     addMessage(chatId, 'user', text);
@@ -813,6 +1025,146 @@ bot.on('callback_query', async (callbackQuery) => {
   const chatId = callbackQuery.message.chat.id;
   const data = callbackQuery.data;
   const msgId = callbackQuery.message.message_id;
+
+  // ─── Menu Navigasi ───
+
+  if (data === 'menu_jadwal') {
+    await bot.answerCallbackQuery(callbackQuery.id, { text: '📅' });
+    await bot.sendMessage(chatId,
+      '📅 *Cek Jadwal Rapat*\n\n' +
+      'Ketik langsung pertanyaan tentang jadwal, contoh:\n' +
+      '• "Jadwal rapat hari ini"\n' +
+      '• "Rapat tanggal 25 juni 2026"\n' +
+      '• "Tampilkan semua rapat minggu ini"\n\n' +
+      'Atau gunakan perintah:\n' +
+      '• `/absensi` — Cek absensi TEKO-CAK\n' +
+      '• `/bbm` — Cek BBM Non-Fosil',
+      { parse_mode: 'Markdown' }
+    );
+    return;
+  }
+
+  if (data === 'menu_tugas') {
+    await bot.answerCallbackQuery(callbackQuery.id, { text: '📋' });
+    await bot.sendMessage(chatId,
+      '📋 *Cek Tugas & Disposisi*\n\n' +
+      'Ketik langsung, contoh:\n' +
+      '• "Tampilkan tugas hari ini"\n' +
+      '• "Apa saja tugas yang ada?"\n' +
+      '• "Tugas tanggal 25 juni"\n\n' +
+      'Atau gunakan perintah /help untuk bantuan.',
+      { parse_mode: 'Markdown' }
+    );
+    return;
+  }
+
+  if (data === 'menu_tekocak') {
+    await bot.answerCallbackQuery(callbackQuery.id, { text: '🤖' });
+    await bot.sendMessage(chatId,
+      '🤖 *TEKO-CAK Menu*\n\n' +
+      '`/tekocak` — Jalankan semua task (Login → Generate → Update)\n' +
+      '`/tekocak login` — Login saja\n' +
+      '`/tekocak generate` — Generate laporan absensi\n' +
+      '`/tekocak update` — Update semua pegawai\n' +
+      '`/tekocak update <NIP>` — Update 1 pegawai\n' +
+      '`/absensi` — Cek absensi hari ini\n' +
+      '`/tekocak help` — Bantuan lengkap\n\n' +
+      '⏱️ Proses update butuh beberapa menit.',
+      { parse_mode: 'Markdown' }
+    );
+    return;
+  }
+
+  if (data === 'menu_absensi') {
+    await bot.answerCallbackQuery(callbackQuery.id, { text: '📊' });
+    try {
+      const api = require('../services/apiClient');
+      const data = await api.getAbsensiHariIni();
+      await sendAbsensiResponse(chatId, data, 'Absensi TEKO-CAK Hari Ini');
+    } catch (err) {
+      await bot.sendMessage(chatId, '❌ Error mengambil data absensi: ' + err.message);
+    }
+    return;
+  }
+
+  if (data === 'menu_bbm') {
+    await bot.answerCallbackQuery(callbackQuery.id, { text: '🛢️' });
+    try {
+      const api = require('../services/apiClient');
+      const data = await api.getBbmNonFosilHariIni();
+      const formatted = formatBbm(data, 'BBM Non-Fosil Hari Ini 🛢️');
+      if (formatted && formatted.text) {
+        await bot.sendMessage(chatId, formatted.text, { parse_mode: 'HTML' });
+      } else {
+        await bot.sendMessage(chatId, '📭 Tidak ada data BBM Non-Fosil hari ini.');
+      }
+    } catch (err) {
+      await bot.sendMessage(chatId, '❌ Error: ' + err.message);
+    }
+    return;
+  }
+
+  if (data === 'menu_status') {
+    await bot.answerCallbackQuery(callbackQuery.id, { text: 'ℹ️' });
+    // Re-use status logic
+    const aiConfigured = process.env.OPENROUTER_API_KEY ? '✅ Terkonfigurasi' : '❌ Belum diatur';
+    const aiModel = process.env.OPENROUTER_MODEL || 'cohere/north-mini-code:free';
+    let dbStatusText = '⚠️ Tidak bisa hubungi API backend';
+    try {
+      const api = require('../services/apiClient');
+      const health = await api.healthCheck();
+      if (health.databases) {
+        dbStatusText = health.databases
+          .map((s) => `  ${s.ok ? '✅' : '❌'} ${s.name}: ${s.ok ? 'Terhubung' : s.message}`)
+          .join('\n');
+      }
+    } catch (err) {
+      dbStatusText = `  ❌ API: ${err.message}`;
+    }
+    await bot.sendMessage(chatId,
+      '✅ *Bot Status: AKTIF*\n\n' +
+      '📡 Mode: Polling\n' +
+      '🧠 AI: ' + aiConfigured + '\n' +
+      '🤖 Model: ' + aiModel + '\n' +
+      '🗄 *Database:*\n' + dbStatusText + '\n' +
+      '⏱ Waktu: ' + new Date().toLocaleString('id-ID'),
+      { parse_mode: 'Markdown' }
+    );
+    return;
+  }
+
+  if (data === 'menu_help') {
+    await bot.answerCallbackQuery(callbackQuery.id, { text: '❓' });
+    const helpMessage = `
+📋 *Bantuan — BKPSDM Telegram Bot*
+
+🧠 *Bot ini didukung AI dari OpenRouter!*
+Kamu bisa ngobrol dengan bahasa alami, tidak perlu perintah kaku.
+
+💬 *Contoh percakapan:*
+• "Halo, apa kabar?"
+• "Jadwal rapat hari ini?"
+• "Tampilkan jadwal rapat 26 juni"
+• "Munculkan tugas 25 juni"
+• "Tugas hari ini"
+
+📌 *Perintah khusus:*
+/start — Menu utama
+/help — Bantuan ini
+/reset — Hapus riwayat chat
+/status — Cek status bot
+/info — Info akun kamu
+/tekocak — Automasi absensi TEKO-CAK
+/absensi — Cek absensi TEKO-CAK hari ini
+/bbm — Cek BBM Non-Fosil
+
+💡 *Tips:* Semakin detail pertanyaanmu, semakin baik jawabannya!
+    `;
+    await bot.sendMessage(chatId, helpMessage, { parse_mode: 'Markdown' });
+    return;
+  }
+
+  // ─── Existing handlers ───
 
   // Handler: Hapus Tugas
   if (data.startsWith('hapus_tugas_')) {

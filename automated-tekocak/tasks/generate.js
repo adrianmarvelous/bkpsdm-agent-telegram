@@ -22,7 +22,7 @@ async function run(page) {
   const tglMulai = `01/${month}/${year}`;
   const tglAkhir = `${day}/${month}/${year}`;
 
-  await page.goto(HALAMAN_GENERATE, { waitUntil: 'networkidle' });
+  await page.goto(HALAMAN_GENERATE, { waitUntil: 'load', timeout: 60000 });
 
   console.log('  [1] Pilih "By : Instansi"...');
   await page.locator('select').nth(1).selectOption('By : Instansi');

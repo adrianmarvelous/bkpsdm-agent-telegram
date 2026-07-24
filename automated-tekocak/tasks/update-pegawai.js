@@ -15,18 +15,22 @@ async function run(page, browser, nipList = null) {
   console.log('  TASK 3: UPDATE DATA PEGAWAI');
   console.log('═══════════════════════════════════════');
 
-  await page.goto(HALAMAN_PEGAWAI, { waitUntil: 'networkidle' });
+  await page.goto(HALAMAN_PEGAWAI, { waitUntil: 'load', timeout: 60000 });
 
   console.log('  [1] Pilih instansi...');
   await page.locator('select').filter({ hasText: INSTANSI.substring(0, 20) }).selectOption(INSTANSI);
   await page.waitForTimeout(1500);
 
   const nips = nipList || DAFTAR_NIP;
+  const totalAll = DAFTAR_NIP.length;
   console.log(`  Total NIP: ${nips.length}`);
+
+  const failedNips = [];
 
   for (let i = 0; i < nips.length; i++) {
     const nip = nips[i];
-    console.log(`\n  --- Pegawai ${i+1}/${DAFTAR_NIP.length}: ${nip} ---`);
+    const seq = nipList ? `${DAFTAR_NIP.indexOf(nip) + 1}/${totalAll}` : `${i+1}/${totalAll}`;
+    console.log(`\n  --- Pegawai ${seq}: ${nip} ---`);
 
     try {
       // Reload halaman untuk state bersih
@@ -73,6 +77,7 @@ async function run(page, browser, nipList = null) {
       const errMsg = err.message.split('\n')[0];
       console.log(`      ⚠️  Gagal: ${errMsg}`);
       console.log('      ➜ Skip');
+      failedNips.push(nip);
 
       // Jika page sudah closed, buat page baru dari browser
       if (errMsg.includes('closed')) {
@@ -89,6 +94,8 @@ async function run(page, browser, nipList = null) {
       }
     }
   }
+
+  return failedNips;
 }
 
 // ===== Standalone =====
