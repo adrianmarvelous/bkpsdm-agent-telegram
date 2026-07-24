@@ -1,0 +1,163 @@
+
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Laporan Automasi Kantorku</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 20px;
+            min-height: 100vh;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.3);
+            overflow: hidden;
+        }
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+        }
+        .header p {
+            font-size: 1.1em;
+            opacity: 0.9;
+        }
+        .content {
+            padding: 30px;
+        }
+        .section {
+            margin-bottom: 40px;
+        }
+        .section h2 {
+            color: #333;
+            border-bottom: 3px solid #667eea;
+            padding-bottom: 10px;
+            margin-bottom: 20px;
+            font-size: 1.8em;
+        }
+        .screenshot-item {
+            margin-bottom: 30px;
+            background: #f5f5f5;
+            padding: 15px;
+            border-radius: 5px;
+        }
+        .screenshot-item h3 {
+            color: #667eea;
+            margin-bottom: 15px;
+            font-size: 1.2em;
+        }
+        .screenshot-item img {
+            max-width: 100%;
+            height: auto;
+            border-radius: 5px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+        }
+        .logs {
+            background: #1e1e1e;
+            color: #d4d4d4;
+            padding: 20px;
+            border-radius: 5px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.9em;
+            max-height: 500px;
+            overflow-y: auto;
+            line-height: 1.6;
+        }
+        .logs p {
+            margin: 5px 0;
+            color: #d4d4d4;
+        }
+        .footer {
+            background: #f5f5f5;
+            padding: 20px;
+            text-align: center;
+            color: #666;
+            border-top: 1px solid #ddd;
+        }
+        .status-badge {
+            display: inline-block;
+            background: #4ec9b0;
+            color: white;
+            padding: 8px 15px;
+            border-radius: 20px;
+            font-weight: bold;
+            margin-top: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📊 Laporan Automasi Kantorku</h1>
+            <p>Proses Login dan Navigasi Jadwal WFH</p>
+            <div class="status-badge">✅ BERHASIL</div>
+        </div>
+        <div class="content">
+            <div class="section">
+                <h2>📸 Screenshots Proses</h2>
+                
+        <div class="screenshot-item">
+            <h3>Halaman Login</h3>
+            <img src="screenshots/01-halaman-login.png" alt="Halaman Login" />
+        </div>
+    
+        <div class="screenshot-item">
+            <h3>Form Terisi</h3>
+            <img src="screenshots/02-form-terisi.png" alt="Form Terisi" />
+        </div>
+    
+        <div class="screenshot-item">
+            <h3>Dialog Berhasil Login</h3>
+            <img src="screenshots/03-dialog-login.png" alt="Dialog Berhasil Login" />
+        </div>
+    
+        <div class="screenshot-item">
+            <h3>Halaman Setelah Login</h3>
+            <img src="screenshots/04-setelah-login.png" alt="Halaman Setelah Login" />
+        </div>
+    
+        <div class="screenshot-item">
+            <h3>Halaman Jadwal WFA</h3>
+            <img src="screenshots/05-halaman-wfa.png" alt="Halaman Jadwal WFA" />
+        </div>
+    
+        <div class="screenshot-item">
+            <h3>Setelah Klik Jadwal</h3>
+            <img src="screenshots/06-setelah-klik-jadwal.png" alt="Setelah Klik Jadwal" />
+        </div>
+    
+            </div>
+            <div class="section">
+                <h2>📋 Log Output</h2>
+                <div class="logs">
+                    <p>🚀 Meluncurkan browser (headless mode)...</p><p>📄 Membuka halaman login...</p><p>✅ Halaman login terbuka</p><p>✏️  Mengisi NIK...</p><p>✏️  Mengisi Password...</p><p>✅ Form login terisi</p><p>🔑 Mengklik tombol Masuk...</p><p>✅ Tombol Masuk diklik</p><p>⏳ Menunggu dialog konfirmasi login...</p><p>✅ Dialog berhasil login muncul</p><p>👆 Mengklik tombol OK...</p><p>✅ Tombol OK diklik</p><p>⏳ Menunggu navigasi ke halaman utama...</p><p>📍 Halaman saat ini: https://kantorku.surabaya.go.id/home</p><p>✅ Login BERHASIL!</p><p>
+📄 Navigasi ke halaman Jadwal WFA...</p><p>✅ Halaman Jadwal WFA terbuka</p><p>🔍 Mencari tombol Jadwal Work From Home...</p><p>✅ Tombol Jadwal Work From Home diklik</p><p>📍 URL akhir: https://kantorku.surabaya.go.id/admin?modul=wfa&amp;child=jadwal_wfa</p><p>
+✅ Semua tahap automasi selesai!</p><p>📝 Membuat HTML report...</p>
+                </div>
+            </div>
+        </div>
+        <div class="footer">
+            <p>Generated pada 24/7/2026, 13.38.04</p>
+            <p>Laporan Automasi Kantorku Pemerintah Kota Surabaya</p>
+        </div>
+    </div>
+</body>
+</html>
+    

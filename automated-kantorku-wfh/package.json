@@ -1,0 +1,16 @@
+{
+  "name": "automated-kantorku-wfh",
+  "version": "1.0.0",
+  "description": "Automasi login Kantorku WFH",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "dotenv": "^17.4.2",
+    "puppeteer": "^25.3.0"
+  }
+}
