@@ -162,8 +162,6 @@ function formatJadwal(rows, title, channel = 'telegram') {
 
   if (channel === 'telegram') {
     msg += '<i>Klik tombol di bawah untuk disposisi rapat</i>';
-  } else {
-    msg += '<i>Disposisi rapat tersedia via Telegram</i>';
   }
   return { text: msg, keyboard };
 }
@@ -192,8 +190,6 @@ function formatTugas(rows, title, channel = 'telegram') {
 
   if (channel === 'telegram') {
     msg += '<i>Klik 🗑 Hapus untuk menghapus tugas</i>';
-  } else {
-    msg += '<i>Hapus tugas tersedia via Telegram</i>';
   }
   return { text: msg, keyboard };
 }
@@ -423,6 +419,19 @@ async function handleMessage({ text, userId, authorized = true, channel = 'teleg
         const formatted = formatJadwal(result, `Jadwal Rapat ${tanggal} 📆`, channel);
         return renderQueryResult(formatted, '📭 Tidak ada jadwal rapat.', channel);
       }
+      // Bukan tanggal — coba deteksi bahasa alami (mis. "jadwal rapat hari ini")
+      const natQuery = detectJadwalQuery(input);
+      if (natQuery) {
+        const result = await executeTool(natQuery.tool, natQuery.args);
+        const titles = {
+          get_jadwal_rapat_hari_ini: 'Jadwal Rapat Hari Ini 📆',
+          get_jadwal_rapat_minggu_ini: 'Jadwal Rapat Minggu Ini 📆',
+          get_jadwal_rapat_by_tanggal: `Jadwal Rapat ${natQuery.args.tanggal || ''} 📆`,
+          get_semua_jadwal_rapat: 'Semua Jadwal Rapat 📆',
+        };
+        const formatted = formatJadwal(result, titles[natQuery.tool] || 'Jadwal Rapat', channel);
+        return renderQueryResult(formatted, '📭 Tidak ada jadwal rapat.', channel);
+      }
       return [{ type: 'text', text: '⚠️ Format: `jadwal YYYY-MM-DD` atau `jadwal 26 juni`' }];
     }
     if (firstWord === 'jadwal-besok' || firstWord === 'jadwal_besok') {
@@ -439,6 +448,18 @@ async function handleMessage({ text, userId, authorized = true, channel = 'teleg
         const formatted = formatTugas(result, `Tugas ${tanggal} 📋`, channel);
         return renderQueryResult(formatted, '📭 Tidak ada tugas.', channel);
       }
+      // Bukan tanggal — coba deteksi bahasa alami (mis. "tugas hari ini")
+      const natQuery = detectTugasQuery(input);
+      if (natQuery) {
+        const result = await executeTool(natQuery.tool, natQuery.args);
+        const titles = {
+          get_tugas_hari_ini: 'Tugas Hari Ini 📋',
+          get_tugas_by_tanggal: `Tugas ${natQuery.args.tanggal || ''} 📋`,
+          get_semua_tugas: 'Semua Tugas 📋',
+        };
+        const formatted = formatTugas(result, titles[natQuery.tool] || 'Tugas', channel);
+        return renderQueryResult(formatted, '📭 Tidak ada tugas.', channel);
+      }
       return [{ type: 'text', text: '⚠️ Format: `tugas YYYY-MM-DD` atau `tugas 26 juni`' }];
     }
     if (firstWord === 'tugas-besok' || firstWord === 'tugas_besok') {
@@ -451,6 +472,11 @@ async function handleMessage({ text, userId, authorized = true, channel = 'teleg
     if (firstWord === 'absensi') {
       const tanggalStr = parts.slice(1).join(' ').replace(/^tanggal\s+/i, '');
       if (tanggalStr) {
+        // "absensi hari ini" / "absensi sekarang" / "absensi today" → data hari ini
+        if (/(hari\s*ini|sekarang|today)/i.test(tanggalStr)) {
+          const result = await executeTool('get_absensi_today', {});
+          return [await buildAbsensiReply(result, 'Absensi TEKO-CAK Hari Ini')];
+        }
         const tanggal = parseIndonesianDate(tanggalStr) || tanggalStr;
         const result = await executeTool('get_absensi_by_tanggal', { tanggal });
         return [await buildAbsensiReply(result, `Absensi TEKO-CAK ${result.tanggal || tanggal}`)];

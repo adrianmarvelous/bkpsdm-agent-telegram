@@ -97,6 +97,7 @@ function formatTanggal(tgl) {
  * Format response baru: { success, tanggal, ringkasan: { total_pegawai, normal, anomali, rincian_masalah }, anomali: [...] }
  */
 function generateAbsensiPdf(data) {
+  // Path Linux (VPS) — project berjalan di Linux, /tmp selalu tersedia
   const tmpPath = path.join('/tmp', `absensi-${Date.now()}.pdf`);
   const doc = new PDFDocument({
     size: 'A4',

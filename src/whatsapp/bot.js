@@ -35,10 +35,60 @@ if (ALLOWED_NUMBERS.length > 0) {
   console.log('🌐 WA Mode publik — atur WA_ALLOWED_NUMBERS di .env untuk membatasi akses');
 }
 
-/** JID WhatsApp format: 628xxx@s.whatsapp.net → bandingkan dengan allowlist */
-function isAuthorized(jid) {
+/**
+ * WhatsApp kini memakai LID (Linked ID) untuk sebagian jid, mis. "7234...@lid",
+ * bukan nomor HP "628xxx@s.whatsapp.net". Kita simpan mapping LID → nomor HP
+ * dari event 'lid-mapping.update' dan/atau resolve via Baileys saat pesan masuk.
+ */
+const lidToPnCache = new Map();
+
+function isLidJid(jid) {
+  return /@(lid|hosted\.lid)$/.test(String(jid));
+}
+
+/** Ambil angka murni dari jid nomor HP (628xxx@s.whatsapp.net / 628xxx:0@s.whatsapp.net / @hosted) */
+function numberFromPnJid(jid) {
+  // Format bisa 628xxx@s.whatsapp.net atau 628xxx:0@s.whatsapp.net (device ID di belakang ':')
+  const user = String(jid).split('@')[0].split(':')[0];
+  return user.replace(/[^0-9]/g, '');
+}
+
+/**
+ * Resolve jid (bisa LID atau nomor HP) → nomor HP murni (hanya digit).
+ * Prioritas: cache lokal → signalRepository.getPNForLID() → null.
+ */
+async function resolveNumber(sock, jid) {
+  const jidStr = String(jid);
+
+  if (!isLidJid(jidStr)) {
+    // Sudah berbentuk nomor HP langsung
+    return numberFromPnJid(jidStr);
+  }
+
+  // JID LID → cari nomor HP yang tertaut
+  if (lidToPnCache.has(jidStr)) {
+    return numberFromPnJid(lidToPnCache.get(jidStr));
+  }
+
+  try {
+    const pn = await sock?.signalRepository?.lidMapping?.getPNForLID(jidStr);
+    if (pn) {
+      lidToPnCache.set(jidStr, pn);
+      return numberFromPnJid(pn);
+    }
+  } catch (err) {
+    console.warn(`⚠️ Gagal resolve LID ${jidStr}: ${err.message}`);
+  }
+
+  // LID tidak bisa dicocokkan dengan allowlist nomor HP → tolak
+  return null;
+}
+
+/** JID WhatsApp → bandingkan dengan allowlist (support LID & nomor HP) */
+async function isAuthorized(sock, jid) {
   if (ALLOWED_NUMBERS.length === 0) return true;
-  const number = String(jid).split('@')[0].replace(/[^0-9]/g, '');
+  const number = await resolveNumber(sock, jid);
+  if (!number) return false;
   return ALLOWED_NUMBERS.some((n) => number === n || number.endsWith(n));
 }
 
@@ -116,34 +166,46 @@ async function startBot() {
 
   sock.ev.on('creds.update', saveCreds);
 
+  // Simpan mapping LID → nomor HP begitu Baileys memberitahu
+  sock.ev.on('lid-mapping.update', ({ lid, pn }) => {
+    if (lid && pn) lidToPnCache.set(String(lid), String(pn));
+  });
+
   sock.ev.on('messages.upsert', async ({ messages }) => {
     const m = messages[0];
     if (!m.key || !m.key.remoteJid || m.key.fromMe) return;
     if (m.key.remoteJid.endsWith('@broadcast')) return;
-    if (m.key.remoteJid.endsWith('@g.us')) return; // grup — Fase 1: abaikan
+
+    const isGroup = m.key.remoteJid.endsWith('@g.us');
+    // Di grup: balasan → grup, pengirim → participant (untuk otorisasi & riwayat chat)
+    const replyJid = m.key.remoteJid;
+    const senderJid = isGroup ? (m.key.participant || m.key.remoteJid) : m.key.remoteJid;
 
     const text = m.message?.conversation || m.message?.extendedTextMessage?.text || '';
     if (!text) return;
 
-    const jid = m.key.remoteJid;
-    console.log(`📩 WA dari ${jid}: ${text.slice(0, 80)}`);
+    const number = await resolveNumber(sock, senderJid);
+    console.log(`📩 WA ${isGroup ? 'GRUP' : 'PRIBADI'} dari ${senderJid}${number ? ` (${number})` : ''}: ${text.slice(0, 80)}`);
 
-    if (!isAuthorized(jid)) {
-      await sock.sendMessage(jid, { text: '⛔ Anda tidak memiliki akses ke bot ini.' });
+    if (!(await isAuthorized(sock, senderJid))) {
+      // Di grup: jangan balas "tidak punya akses" agar tidak spam untuk semua anggota
+      if (!isGroup) {
+        await sock.sendMessage(replyJid, { text: '⛔ Anda tidak memiliki akses ke bot ini.' });
+      }
       return;
     }
 
     // Status "memproses" (tidak bisa di-delete seperti Telegram — tetap tampil)
-    await sock.sendMessage(jid, { text: '⏳ Mohon tunggu, sedang mencari data...' });
+    await sock.sendMessage(replyJid, { text: '⏳ Mohon tunggu, sedang mencari data...' });
 
     try {
-      const replies = await handleMessage({ text, userId: jid, authorized: true, channel: 'whatsapp' });
+      const replies = await handleMessage({ text, userId: senderJid, authorized: true, channel: 'whatsapp' });
       for (const reply of replies) {
-        await sendReply(sock, jid, reply);
+        await sendReply(sock, replyJid, reply);
       }
     } catch (err) {
       console.error('❌ WA error:', err.message);
-      await sock.sendMessage(jid, { text: '😅 Maaf, terjadi kesalahan. Silakan coba lagi.' });
+      await sock.sendMessage(replyJid, { text: '😅 Maaf, terjadi kesalahan. Silakan coba lagi.' });
     }
   });
 
