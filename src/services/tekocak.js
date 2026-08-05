@@ -5,10 +5,11 @@
  * dan mengirim hasilnya ke Telegram.
  *
  * Task tersedia:
- *   - login    : Login saja
- *   - generate : Generate laporan absensi
- *   - update   : Update data pegawai per NIP
- *   - all      : Login → Generate → Update (full)
+ *   - login            : Login saja
+ *   - generate         : Generate laporan absensi (H-1 → hari ini)
+ *   - generate-tanggal : Generate laporan untuk tanggal spesifik (butuh param tanggal, YYYY-MM-DD)
+ *   - update           : Update data pegawai per NIP
+ *   - all              : Login → Generate → Update (full)
  */
 const { chromium } = require('playwright');
 const path = require('path');
@@ -51,12 +52,13 @@ function formatDuration(seconds) {
 /**
  * Jalankan task TEKO-CAK
  *
- * @param {'all'|'login'|'generate'|'update'} taskName
+ * @param {'all'|'login'|'generate'|'generate-tanggal'|'update'} taskName
  * @param {function(string)} onProgress - callback tiap baris log (opsional)
  * @param {string|null} nip - NIP spesifik (untuk update 1 pegawai, opsional)
+ * @param {string|null} tanggal - tanggal spesifik YYYY-MM-DD (untuk generate-tanggal, opsional)
  * @returns {Promise<{success: boolean, output: string, duration: number}>}
  */
-async function runTask(taskName, onProgress = () => {}, nip = null) {
+async function runTask(taskName, onProgress = () => {}, nip = null, tanggal = null) {
   const startTime = Date.now();
   const lines = [];
   const log = (msg) => { lines.push(msg); onProgress(msg); };
@@ -122,14 +124,15 @@ async function runTask(taskName, onProgress = () => {}, nip = null) {
   try {
     browser = await chromium.launch({
       headless: config.HEADLESS,
-      channel: 'chrome',
+      
       args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
     });
-    const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+    let page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
 
     // Load task modules
     const login = require(path.join(TEKOCAK_DIR, 'tasks', 'login'));
     const generate = require(path.join(TEKOCAK_DIR, 'tasks', 'generate'));
+    const generateTanggal = require(path.join(TEKOCAK_DIR, 'tasks', 'generate-tanggal'));
     const updatePegawai = require(path.join(TEKOCAK_DIR, 'tasks', 'update-pegawai'));
 
     // ===== LOGIN =====
@@ -152,6 +155,23 @@ async function runTask(taskName, onProgress = () => {}, nip = null) {
       log('✅ **Generate laporan selesai!**\n');
     }
 
+    // ===== GENERATE TANGGAL SPESIFIK (fungsi baru, tidak ubah generate biasa) =====
+    if (taskName === 'generate-tanggal') {
+      if (!tanggal) {
+        console.log = originalLog;
+        await browser.close();
+        const duration = (Date.now() - startTime) / 1000;
+        return {
+          success: false,
+          output: '❌ **Tanggal tidak diberikan.**\nGunakan: `/tekocak generate tanggal <tanggal>`\nContoh: `/tekocak generate tanggal 4 agustus`',
+          duration,
+        };
+      }
+      log(`📊 **Generate Laporan (Tanggal: ${tanggal})...**`);
+      await generateTanggal.run(page, tanggal);
+      log('✅ **Generate laporan tanggal spesifik selesai!**\n');
+    }
+
     // ===== UPDATE PEGAWAI =====
     if (taskName === 'all' || taskName === 'update') {
       const nips = nip ? [nip] : config.DAFTAR_NIP;
@@ -172,7 +192,7 @@ async function runTask(taskName, onProgress = () => {}, nip = null) {
           await browser.close();
           browser = await chromium.launch({
             headless: config.HEADLESS,
-            channel: 'chrome',
+            
             args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
           });
           page = await browser.newPage({ viewport: { width: 1280, height: 800 } });

@@ -1,210 +1,80 @@
+/**
+ * WhatsApp Adapter — BKPSDM Agent (Fase 1)
+ *
+ * Kulit WhatsApp untuk core dispatcher (src/core/dispatcher.js).
+ * Logika SAMA dengan Telegram — adapter ini cuma:
+ *   1. Dengar pesan masuk via Baileys
+ *   2. Cek otorisasi (allowlist nomor WA dari env WA_ALLOWED_NUMBERS)
+ *   3. Panggil handleMessage() → render Reply ke WhatsApp
+ *
+ * WhatsApp tidak punya inline keyboard / HTML / Markdown, jadi:
+ *   - reply 'menu'      → ditampilkan sebagai teks biasa
+ *   - tag HTML di-strip → teks plain (WA tidak render <b>)
+ *   - reply 'document'  → dikirim sebagai attachment PDF
+ *
+ * Env tambahan (di .env root project):
+ *   WA_ALLOWED_NUMBERS=628123456789,628987654321   (kosong = mode publik)
+ */
+
 const { makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
 const QRCode = require('qrcode');
-const moment = require('moment');
+const fs = require('fs');
 const path = require('path');
-const api = require('../services/apiClient');
+const { handleMessage } = require('../core/dispatcher');
 
-const AUTH_DIR = path.resolve(__dirname, '../../auth_info');
+// =============== AUTHORIZATION (allowlist nomor WA) ===============
 
-// ─── Formatter ─────────────────────────────────────────────────────────────
+const ALLOWED_NUMBERS = (process.env.WA_ALLOWED_NUMBERS || '')
+  .split(',')
+  .map((s) => s.trim().replace(/[^0-9]/g, ''))
+  .filter((s) => s.length > 0);
 
-function formatJadwal(rows) {
-  if (!rows || rows.length === 0) return '📅 _Tidak ada jadwal._';
-  return rows.map((r, i) =>
-    `*${i + 1}. ${r.nama_acara}*\n` +
-    `   🕐 ${r.pukul_mulai} - ${r.pukul_selesai || '?'}\n` +
-    `   📍 ${r.tempat || '-'}\n` +
-    `   📝 ${r.keterangan || '-'}`
-  ).join('\n\n');
+if (ALLOWED_NUMBERS.length > 0) {
+  console.log(`🔒 WA Mode terbatas: ${ALLOWED_NUMBERS.length} nomor diizinkan`);
+} else {
+  console.log('🌐 WA Mode publik — atur WA_ALLOWED_NUMBERS di .env untuk membatasi akses');
 }
 
-function formatTugas(rows) {
-  if (!rows || rows.length === 0) return '📋 _Tidak ada tugas._';
-  return rows.map((r, i) =>
-    `*${i + 1}. ${r.tugas}*\n` +
-    `   🕐 ${r.jam || '-'}\n` +
-    `   👤 Disposisi ke: ${r.disposisi_ke || '-'}\n` +
-    `   👥 Pegawai: ${r.pegawai || '-'}`
-  ).join('\n\n');
+/** JID WhatsApp format: 628xxx@s.whatsapp.net → bandingkan dengan allowlist */
+function isAuthorized(jid) {
+  if (ALLOWED_NUMBERS.length === 0) return true;
+  const number = String(jid).split('@')[0].replace(/[^0-9]/g, '');
+  return ALLOWED_NUMBERS.some((n) => number === n || number.endsWith(n));
 }
 
-function formatAbsensi(rows) {
-  if (!rows || rows.length === 0) return '✅ _Tidak ada data absensi._';
-  return rows.map(r =>
-    `*${r.id_pegawai}*\n   Status: ${r.hadir ? '✅ Hadir' : '❌ Tidak Hadir'}\n   Tanggal: ${r.tanggal}`
-  ).join('\n\n');
+// =============== RENDER Reply → WhatsApp ===============
+
+/** Bersihkan HTML & Markdown → teks plain untuk WhatsApp */
+function waText(s) {
+  return String(s || '')
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1') // markdown link → teks saja
+    .replace(/<[^>]+>/g, '')                    // HTML tags
+    .replace(/(\*\*|__|\*|_|`)/g, '');           // markdown markers
 }
 
-// ─── Natural Language → Command ────────────────────────────────────────────
+async function sendReply(sock, jid, reply) {
+  if (!reply) return;
 
-function naturalToCommand(text) {
-  const lower = text.toLowerCase().trim();
-  if (/^(tugas|tugas hari ini)/i.test(lower)) return '/tugas-hariini';
-  if (/^(tugas besok)/i.test(lower)) return '/tugas-besok';
-  if (/^(tugas semua|semua tugas)/i.test(lower)) return '/tugas-semua';
-  if (/^tugas \d{4}-\d{2}-\d{2}$/i.test(lower)) return `/tugas ${lower.split(/\s+/)[1]}`;
-  if (/^(jadwal|jadwal hari ini|rapat hari ini)/i.test(lower)) return '/jadwal-hariini';
-  if (/^(jadwal besok|rapat besok)/i.test(lower)) return '/jadwal-besok';
-  if (/^(jadwal minggu ini|rapat minggu ini)/i.test(lower)) return '/jadwal-mingguini';
-  if (/^(jadwal semua|semua jadwal)/i.test(lower)) return '/jadwal-semua';
-  if (/^jadwal \d{4}-\d{2}-\d{2}$/i.test(lower)) return `/jadwal ${lower.split(/\s+/)[1]}`;
-  if (/^(absensi|absen|kehadiran)/i.test(lower)) return '/absensi';
-  if (/^(ping|pong|cek|test)$/i.test(lower)) return '/ping';
-  if (/^(help|bantuan|menu|halo|hai|hallo|siang|pagi|sore)$/i.test(lower)) return '/help';
-  return text;
-}
-
-// ─── Help Text ─────────────────────────────────────────────────────────────
-
-const helpText = `
-*🤖 BKPSDM — WhatsApp Bot*
-
-*Perintah:*
-📅 /jadwal-hariini — Jadwal hari ini
-📅 /jadwal-besok — Jadwal besok
-📅 /jadwal-mingguini — Jadwal minggu ini
-📅 /jadwal YYYY-MM-DD — Jadwal per tanggal
-
-📋 /tugas-hariini — Tugas hari ini
-📋 /tugas-besok — Tugas besok
-📋 /tugas YYYY-MM-DD — Tugas per tanggal
-
-✅ /absensi — Cek absensi hari ini
-🔧 /help — Bantuan
-
-┈┈┈┈┈┈┈┈┈┈┈┈┈┈
-_BKPSDM Surabaya_
-`;
-
-// ─── Command Handler ───────────────────────────────────────────────────────
-
-async function handleCommand(sock, chatId, text) {
-  const normalized = naturalToCommand(text);
-  const parts = normalized.trim().toLowerCase().split(/\s+/);
-  const mainCmd = parts[0];
-  const arg = parts[1];
-
-  try {
-    switch (mainCmd) {
-      case '/jadwal-hariini':
-      case '/jadwal_hari_ini': {
-        const data = await api.get('/jadwal/hari-ini.php');
-        const msg = data.rows?.length
-          ? `📅 *Jadwal Rapat Hari Ini*\n${formatJadwal(data.rows)}`
-          : `📅 ${data.message || 'Tidak ada jadwal hari ini.'}`;
-        await sock.sendMessage(chatId, { text: msg });
-        break;
-      }
-      case '/jadwal-besok': {
-        const besok = moment().add(1, 'day').format('YYYY-MM-DD');
-        const data = await api.get(`/jadwal/tanggal.php?date=${besok}`);
-        const msg = data.rows?.length
-          ? `📅 *Jadwal Besok (${besok})*\n${formatJadwal(data.rows)}`
-          : `📅 ${data.message || 'Tidak ada jadwal besok.'}`;
-        await sock.sendMessage(chatId, { text: msg });
-        break;
-      }
-      case '/jadwal-mingguini':
-      case '/jadwal_minggu_ini': {
-        const data = await api.get('/jadwal/minggu-ini.php');
-        const msg = data.rows?.length
-          ? `📅 *Jadwal Minggu Ini*\n${formatJadwal(data.rows)}`
-          : `📅 ${data.message || 'Tidak ada jadwal minggu ini.'}`;
-        await sock.sendMessage(chatId, { text: msg });
-        break;
-      }
-      case '/jadwal-semua':
-      case '/jadwal_semua': {
-        const data = await api.get('/jadwal/semua.php');
-        const msg = data.rows?.length
-          ? `📅 *Semua Jadwal*\n${formatJadwal(data.rows)}`
-          : '📅 _Tidak ada jadwal._';
-        await sock.sendMessage(chatId, { text: msg });
-        break;
-      }
-      case '/jadwal': {
-        if (!arg || !/^\d{4}-\d{2}-\d{2}$/.test(arg)) {
-          await sock.sendMessage(chatId, { text: '⚠️ Format: /jadwal YYYY-MM-DD' });
-          return;
-        }
-        const data = await api.get(`/jadwal/tanggal.php?date=${arg}`);
-        const msg = data.rows?.length
-          ? `📅 *Jadwal (${arg})*\n${formatJadwal(data.rows)}`
-          : `📅 ${data.message || 'Tidak ada jadwal.'}`;
-        await sock.sendMessage(chatId, { text: msg });
-        break;
-      }
-      case '/tugas-hariini':
-      case '/tugas_hari_ini': {
-        const data = await api.get('/tugas/hari-ini.php');
-        const msg = data.rows?.length
-          ? `📋 *Tugas Hari Ini*\n${formatTugas(data.rows)}`
-          : `📋 ${data.message || 'Tidak ada tugas hari ini.'}`;
-        await sock.sendMessage(chatId, { text: msg });
-        break;
-      }
-      case '/tugas-besok': {
-        const besok = moment().add(1, 'day').format('YYYY-MM-DD');
-        const data = await api.get(`/tugas/tanggal.php?date=${besok}`);
-        const msg = data.rows?.length
-          ? `📋 *Tugas Besok (${besok})*\n${formatTugas(data.rows)}`
-          : `📋 ${data.message || 'Tidak ada tugas besok.'}`;
-        await sock.sendMessage(chatId, { text: msg });
-        break;
-      }
-      case '/tugas-semua':
-      case '/tugas_semua': {
-        const data = await api.get('/tugas/semua.php');
-        const msg = data.rows?.length
-          ? `📋 *Semua Tugas*\n${formatTugas(data.rows)}`
-          : '📋 _Tidak ada tugas._';
-        await sock.sendMessage(chatId, { text: msg });
-        break;
-      }
-      case '/tugas': {
-        if (!arg || !/^\d{4}-\d{2}-\d{2}$/.test(arg)) {
-          await sock.sendMessage(chatId, { text: '⚠️ Format: /tugas YYYY-MM-DD' });
-          return;
-        }
-        const data = await api.get(`/tugas/tanggal.php?date=${arg}`);
-        const msg = data.rows?.length
-          ? `📋 *Tugas (${arg})*\n${formatTugas(data.rows)}`
-          : `📋 ${data.message || 'Tidak ada tugas.'}`;
-        await sock.sendMessage(chatId, { text: msg });
-        break;
-      }
-      case '/absensi': {
-        const data = await api.get('/absensi/bulan-ini.php');
-        const msg = data.rows?.length
-          ? `✅ *Absensi*\n${formatAbsensi(data.rows)}`
-          : '✅ _Tidak ada data absensi._';
-        await sock.sendMessage(chatId, { text: msg });
-        break;
-      }
-      case '/ping':
-        await sock.sendMessage(chatId, { text: '🏓 *Pong!* Bot aktif ✅' });
-        break;
-      case '/help':
-      case '/start':
-      case 'halo':
-      case 'hai':
-      case 'hallo':
-        await sock.sendMessage(chatId, { text: helpText });
-        break;
-      default:
-        await sock.sendMessage(chatId, {
-          text: `❌ Maaf, tidak paham perintah *${text}*.\n\nKetik /help untuk bantuan.`
-        });
-    }
-  } catch (err) {
-    console.error('[WA] Error:', err.message);
-    await sock.sendMessage(chatId, { text: '❌ Gagal memproses perintah. Coba lagi nanti.' });
+  if (reply.type === 'document') {
+    const data = fs.readFileSync(reply.path);
+    await sock.sendMessage(jid, {
+      document: data,
+      fileName: path.basename(reply.path),
+      mimetype: 'application/pdf',
+      caption: reply.caption ? waText(reply.caption) : undefined,
+    });
+    try { fs.unlinkSync(reply.path); } catch (_) {}
+    return;
   }
+
+  // type: 'text' | 'menu' (menu → teks biasa, WA tidak ada inline keyboard)
+  await sock.sendMessage(jid, { text: waText(reply.text) });
 }
 
-// ─── Main WhatsApp Connection ──────────────────────────────────────────────
+// =============== MAIN — Baileys WhatsApp Connection ===============
 
 async function startBot() {
+  const AUTH_DIR = path.join(__dirname, 'auth_info');
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
 
   const sock = makeWASocket({
@@ -216,56 +86,68 @@ async function startBot() {
     const { connection, lastDisconnect, qr } = update;
 
     if (qr) {
-      console.log('\n📱 Scan QR Code untuk login WhatsApp:\n');
+      console.log('\n📱 Scan QR Code ini dengan WhatsApp (⋮ → Perangkat Tertaut):\n');
       QRCode.toString(qr, { type: 'terminal', small: true }, (err, url) => {
-        if (err) console.log('QR:', qr);
+        if (err) console.log('QR String:', qr);
         else console.log(url);
       });
-      QRCode.toFile('qr-code.png', qr, { width: 400 }, (err) => {
-        if (!err) console.log('📸 QR disimpan di qr-code.png');
+      const qrPath = path.join(__dirname, 'qr-code.png');
+      QRCode.toFile(qrPath, qr, { width: 400 }, (err) => {
+        if (!err) console.log(`📸 QR disimpan di ${qrPath} — buka file ini untuk scan`);
       });
-      console.log('');
     }
 
     if (connection === 'open') {
-      console.log('✅ WhatsApp terhubung!');
+      console.log('✅ Bot terhubung ke WhatsApp!');
       console.log(`📱 Nomor: ${sock.user.id.split(':')[0]}`);
     }
 
     if (connection === 'close') {
       const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-      console.log(`❌ Koneksi WA terputus. Reconnect: ${shouldReconnect}`);
+      console.log(`❌ Koneksi terputus. Reconnect: ${shouldReconnect}`);
       if (shouldReconnect) {
-        console.log('⏳ Reconnect dalam 5 detik...');
+        console.log('⏳ Coba reconnect dalam 5 detik...');
         setTimeout(() => startBot(), 5000);
       } else {
-        console.log('⚠️ Logout. Hapus auth_info/ untuk login ulang.');
+        console.log('⚠️ Bot logout. Hapus folder auth_info/ untuk login ulang.');
       }
     }
   });
 
   sock.ev.on('creds.update', saveCreds);
 
-  sock.ev.on('messages.upsert', async (msg) => {
-    const message = msg.messages[0];
-    if (!message.key || message.key.fromMe) return;
-    if (message.key.remoteJid.endsWith('@broadcast') || message.key.remoteJid.endsWith('@g.us')) return;
-    if (!message.message?.conversation && !message.message?.extendedTextMessage?.text) return;
+  sock.ev.on('messages.upsert', async ({ messages }) => {
+    const m = messages[0];
+    if (!m.key || !m.key.remoteJid || m.key.fromMe) return;
+    if (m.key.remoteJid.endsWith('@broadcast')) return;
+    if (m.key.remoteJid.endsWith('@g.us')) return; // grup — Fase 1: abaikan
 
-    const chatId = message.key.remoteJid;
-    const text = message.message.conversation || message.message.extendedTextMessage?.text || '';
+    const text = m.message?.conversation || m.message?.extendedTextMessage?.text || '';
     if (!text) return;
 
-    console.log(`📩 [WA] ${chatId}: ${text}`);
-    await handleCommand(sock, chatId, text);
+    const jid = m.key.remoteJid;
+    console.log(`📩 WA dari ${jid}: ${text.slice(0, 80)}`);
+
+    if (!isAuthorized(jid)) {
+      await sock.sendMessage(jid, { text: '⛔ Anda tidak memiliki akses ke bot ini.' });
+      return;
+    }
+
+    // Status "memproses" (tidak bisa di-delete seperti Telegram — tetap tampil)
+    await sock.sendMessage(jid, { text: '⏳ Mohon tunggu, sedang mencari data...' });
+
+    try {
+      const replies = await handleMessage({ text, userId: jid, authorized: true, channel: 'whatsapp' });
+      for (const reply of replies) {
+        await sendReply(sock, jid, reply);
+      }
+    } catch (err) {
+      console.error('❌ WA error:', err.message);
+      await sock.sendMessage(jid, { text: '😅 Maaf, terjadi kesalahan. Silakan coba lagi.' });
+    }
   });
 
-  console.log('🤖 BKPSDM WhatsApp Bot starting...');
+  console.log('🤖 BKPSDM Agent — WhatsApp bot starting...');
 }
 
-// ─── Start ─────────────────────────────────────────────────────────────────
-
-startBot().catch(err => {
-  console.error('[WA] Fatal:', err);
-  process.exit(1);
-});
+module.exports = { startBot, isAuthorized };

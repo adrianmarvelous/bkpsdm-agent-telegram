@@ -16,30 +16,28 @@ async function run(page) {
   await page.goto('https://teko-cak.surabaya.go.id/login', { waitUntil: 'load', timeout: 60000 });
   console.log('  [1] Pilih tahun...');
   await page.selectOption('select', TAHUN);
-  await page.click('button:has-text("Pilih")');
-  await page.waitForURL('**/login/security', { timeout: 15000 });
-
+  // Gunakan Promise.all agar waitForNavigation menangkap navigasi setelah klik
+  // waitUntil: 'load' — bukan networkidle, karena ada polling/keepalive
+  await Promise.all([
+    page.waitForNavigation({ waitUntil: 'load' }),
+    page.click('button:has-text("Pilih")')
+  ]);
   console.log('  [2] Login...');
   // Isi form login
   await page.fill('#USERNAME_LOGIN', USERNAME);
   await page.fill('#PASSWORD_LOGIN', PASSWORD);
-  // Submit via JavaScript — langsung panggil API login
-  const result = await page.evaluate(async ({ username, password, baseUrl }) => {
-    const res = await fetch(baseUrl + 'login/login_data', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({ USERNAME_LOGIN: username, PASSWORD_LOGIN: password }),
-    });
-    const data = await res.json();
-    if (data.status && data.redirect_link) {
-      window.location.href = data.redirect_link;
-      return { ok: true, redirect: data.redirect_link };
-    }
-    return { ok: false, error: data.pesan || 'Login gagal' };
-  }, { username: USERNAME, password: PASSWORD, baseUrl: config.TEKOCAK_URL.replace(/\/+$/, '') + '/' });
-  if (!result.ok) throw new Error(result.error);
-  await page.waitForURL('**/dashboard', { timeout: 60000 });
-  console.log('  ✓ Login berhasil!');
+  // Gunakan klik tombol MASUK langsung, bukan JS fetch
+  await Promise.all([
+    page.waitForNavigation({ waitUntil: 'load' }),
+    page.click('button:has-text("MASUK")')
+  ]);
+  // Pastikan kita di dashboard
+  const finalUrl = page.url();
+  if (finalUrl.includes('/dashboard')) {
+    console.log('  ✓ Login berhasil! (URL: ' + finalUrl + ')');
+  } else {
+    console.log('  ? URL setelah login: ' + finalUrl);
+  }
 
   // Tutup modal jika ada
   try {
@@ -52,12 +50,12 @@ async function run(page) {
 // ===== Standalone =====
 if (require.main === module) {
   (async () => {
-    const browser = await chromium.launch({ headless: config.HEADLESS });
+    const browser = await chromium.launch({ headless: config.HEADLESS, args: ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage','--disable-gpu'] });
     const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
     try {
       await run(page);
       console.log('\n✅ Task Login selesai!');
-      await page.pause();
+      await browser.close();
     } catch (e) {
       console.error('✗ Error:', e.message);
       await browser.close();

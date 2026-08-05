@@ -7,6 +7,7 @@
 const PDFDocument = require('pdfkit');
 const fs = require('fs');
 const path = require('path');
+const { isPulangCepat, countPulangCepat } = require('./absensiRules');
 
 // Kolom tabel: [posX, width]
 const COLUMNS = [
@@ -75,9 +76,11 @@ function drawRow(doc, no, nip, nama, masuk, pulang, status) {
 }
 
 function getStatusLabel(k) {
-  if (k === 'H') return 'Hadir';
-  if (k === 'M') return 'Mangkir';
-  return k || '-';
+  if (!k) return '-';
+  const upper = k.toUpperCase();
+  if (upper === 'H' || upper === 'DR') return 'Hadir';
+  if (upper === 'M') return 'Mangkir';
+  return k;
 }
 
 /**
@@ -117,28 +120,39 @@ function generateAbsensiPdf(data) {
   doc.moveTo(TABLE_LEFT, doc.y).lineTo(TABLE_RIGHT, doc.y).stroke('#cccccc');
   doc.moveDown(0.3);
 
-  // ─── Ringkasan (format baru) ───
+  // ─── Ringkasan (format baru) — DR dianggap Hadir ───
   if (data.ringkasan) {
     const r = data.ringkasan;
-    doc.fontSize(10).font('Helvetica');
+    const anomali = data.anomali || [];
+    const drCount = anomali.filter(a => (a.keterangan || '').toUpperCase() === 'DR').length;
     const total = r.total_pegawai || r.total || 0;
-    const normal = r.normal || r.hadir || 0;
-    const anomali = r.anomali || r.absen || 0;
-    doc.text(`Total: ${total} pegawai  |  ✅ Normal: ${normal}  |  ⚠️ Anomali: ${anomali}`);
+    const normal = (r.normal || r.hadir || 0) + drCount;
+    const anomaliCount = (r.anomali || r.absen || 0) - drCount;
+    const pulangCepat = countPulangCepat(anomali, data.tanggal);
+    doc.fontSize(10).font('Helvetica');
+    doc.text(`Total: ${total} pegawai  |  ✅ Normal: ${normal}  |  ⚠️ Anomali: ${anomaliCount}${pulangCepat > 0 ? `  |  🏃 Pulang cepat: ${pulangCepat}` : ''}`);
     doc.moveDown(0.3);
     doc.moveTo(TABLE_LEFT, doc.y).lineTo(TABLE_RIGHT, doc.y).stroke('#cccccc');
     doc.moveDown(0.5);
   }
 
-  // ─── Tabel Anomali (format baru) ───
-  if (data.anomali && data.anomali.length > 0) {
+  // ─── Tabel Anomali (format baru) — filter DR (dianggap Hadir), KECUALI pulang cepat (kategori terpisah) ───
+  const anomaliFiltered = (data.anomali || []).filter(a => {
+    const k = (a.keterangan || '').toUpperCase();
+    if (isPulangCepat(a.jam_pulang, data.tanggal)) return true; // pulang cepat = kategori sendiri
+    return k !== 'H' && k !== 'DR';
+  });
+  if (anomaliFiltered.length > 0) {
     doc.fontSize(11).font('Helvetica-Bold');
-    doc.text(`⚠️ Anomali (${data.anomali.length})`);
+    doc.text(`⚠️ Anomali (${anomaliFiltered.length})`);
     doc.moveDown(0.2);
 
     drawHeader(doc);
 
-    data.anomali.forEach((r, i) => {
+    anomaliFiltered.forEach((r, i) => {
+      const status = isPulangCepat(r.jam_pulang, data.tanggal)
+        ? `Pulang Cepat (${r.jam_pulang})`
+        : getStatusLabel(r.keterangan);
       drawRow(
         doc,
         String(i + 1),
@@ -146,7 +160,7 @@ function generateAbsensiPdf(data) {
         (r.nama || '-').substring(0, 40),
         r.jam_masuk || '-',
         r.jam_pulang || '-',
-        getStatusLabel(r.keterangan)
+        status
       );
     });
   }

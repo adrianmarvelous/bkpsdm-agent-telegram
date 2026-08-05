@@ -5,9 +5,24 @@ const { getHistory, addMessage, clearHistory } = require('../services/conversati
 const api = require('../services/apiClient');
 const { startDisposisi, getDisposisiState, clearDisposisiState, saveDisposisi, deleteTugas } = require('../services/disposisi');
 const tekocak = require('../services/tekocak');
+const kantorkuWfh = require('../services/kantorkuWfh');
 const fs = require('fs');
 const { generateAbsensiPdf } = require('../services/pdfGenerator');
+const { isPulangCepat, countPulangCepat } = require('../services/absensiRules');
 const { executeTool, parseIndonesianDate } = require('../services/dbTools');
+// ===== Core dispatcher (channel-agnostic — dipakai Telegram & WhatsApp) =====
+const {
+  handleMessage,
+  buildAbsensiReply,
+  formatJadwal,
+  formatTugas,
+  formatBbm,
+  formatAbsensi,
+  detectJadwalQuery,
+  detectTugasQuery,
+  detectBbmQuery,
+  detectAbsensiQuery,
+} = require('../core/dispatcher');
 
 // Ambil token dari environment variable
 const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -148,7 +163,8 @@ Kamu bisa ngobrol dengan bahasa alami, tidak perlu perintah kaku.
 /reset — Hapus riwayat chat
 /status — Cek status bot
 /info — Info akun kamu
-/tekocak — Automasi absensi TEKO-CAK ( /tekocak help)
+/tekocak — Automasi absensi TEKO-CAK (/tekocak help)
+/kantorku — Automasi KantorKu WFH (/kantorku YYYY-MM-DD)
 /absensi — Cek absensi TEKO-CAK hari ini
 
 💡 *Tips:* Semakin detail pertanyaanmu, semakin baik jawabannya!
@@ -261,7 +277,7 @@ ${!isOwner ? `\n📌 *Untuk mengizinkan akses:*\nTambahkan \`${chatId}\` ke \`AL
 /**
  * Helper: jalankan task TEKO-CAK dan kirim hasil ke Telegram
  */
-async function runTekocakTask(chatId, taskName, label, nip = null) {
+async function runTekocakTask(chatId, taskName, label, nip = null, tanggal = null) {
   // Kirim status awal
   const statusMsg = await bot.sendMessage(
     chatId,
@@ -271,12 +287,33 @@ async function runTekocakTask(chatId, taskName, label, nip = null) {
 
   // Kumpulkan log
   const logs = [];
+  let lastProgressEdit = 0;
+
+  // Escape karakter Markdown untuk tampilan live — baris log mentah bisa
+  // mengandung karakter yang bikin parse error saat editMessageText.
+  const escapeMarkdown = (s) => String(s || '').replace(/([_*[\]`])/g, '\\$1');
+
   const onProgress = (msg) => {
     logs.push(msg);
+
+    // ⏳ LIVE PROGRESS: update status message berjalan (throttle ~2 detik
+    // karena Telegram punya rate limit edit). Berlaku untuk SEMUA task
+    // (/tekocak generate, generate tanggal, update, all).
+    const now = Date.now();
+    if (now - lastProgressEdit >= 2000) {
+      lastProgressEdit = now;
+      const line = String(msg || '').trim();
+      const liveText = `⏳ **TEKO-CAK: ${label}**${nip ? ` (NIP: ${nip})` : ''}\n\n${escapeMarkdown(line) || 'Memproses...'}`;
+      bot.editMessageText(liveText, {
+        chat_id: chatId,
+        message_id: statusMsg.message_id,
+        parse_mode: 'Markdown',
+      }).catch(() => {});
+    }
   };
 
   try {
-    const result = await tekocak.runTask(taskName, onProgress, nip);
+    const result = await tekocak.runTask(taskName, onProgress, nip, tanggal);
     let output = result.output;
 
     // Kirim hasil
@@ -327,6 +364,23 @@ bot.onText(/\/tekocak\b(?: (.+))?/, async (msg, match) => {
     return runTekocakTask(chatId, 'login', 'Login');
   }
   if (cmd === 'generate' || cmd === 'gen') {
+    // Dukungan tanggal spesifik: /tekocak generate tanggal 4 agustus
+    // → fungsi baru generate-tanggal (perintah generate biasa TIDAK berubah)
+    const argTanggal = parts.slice(1).join(' ').trim();
+    if (argTanggal) {
+      const cleaned = argTanggal.replace(/^tanggal\s+/i, '');
+      const tanggal = parseIndonesianDate(cleaned);
+      if (!tanggal) {
+        return bot.sendMessage(
+          chatId,
+          `❌ Tanggal tidak dikenali: \`${cleaned}\`\n\n` +
+          `Contoh: \`/tekocak generate tanggal 4 agustus\`\n` +
+          `Format lain: \`4 agustus 2026\`, \`2026-08-04\`, \`04/08/2026\``,
+          { parse_mode: 'Markdown' }
+        );
+      }
+      return runTekocakTask(chatId, 'generate-tanggal', `Generate Laporan (${tanggal})`, null, tanggal);
+    }
     return runTekocakTask(chatId, 'generate', 'Generate Laporan');
   }
   if (cmd === 'update' || cmd === 'upd') {
@@ -341,7 +395,8 @@ bot.onText(/\/tekocak\b(?: (.+))?/, async (msg, match) => {
       '',
       '`/tekocak` — Jalankan semua task (Login → Generate → Update)',
       '`/tekocak login` — Login saja',
-      '`/tekocak generate` — Generate laporan absensi',
+      '`/tekocak generate` — Generate laporan absensi (kemarin → hari ini)',
+      '`/tekocak generate tanggal <tanggal>` — Generate laporan tanggal spesifik, contoh: `/tekocak generate tanggal 4 agustus`',
       '`/tekocak update` — Update semua pegawai (66 NIP)',
       '`/tekocak update <NIP>` — Update 1 pegawai spesifik',
       '`/tekocak help` — Bantuan ini',
@@ -364,33 +419,124 @@ bot.onText(/\/tekocak\b(?: (.+))?/, async (msg, match) => {
   return runTekocakTask(chatId, 'all', 'Semua Task');
 });
 
+// =============== KANTORKU WFH COMMAND ===============
+
+/**
+ * Helper: jalankan KantorKu WFH dan kirim hasil ke Telegram
+ */
+async function runKantorkuWfhTask(chatId, tanggal) {
+  const tglDisplay = tanggal || 'hari ini';
+  const statusMsg = await bot.sendMessage(
+    chatId,
+    `⏳ **KantorKu WFH — ${tglDisplay}**\n\nMemproses... mohon tunggu, ini bisa beberapa menit.`,
+    { parse_mode: 'Markdown' }
+  );
+
+  try {
+    const result = await kantorkuWfh.runWfh(tanggal);
+    try { await bot.deleteMessage(chatId, statusMsg.message_id); } catch (_) {}
+
+    const statusIcon = result.success ? '✅' : '❌';
+    let output = result.output;
+
+    // Ambil baris penting saja (filter noise)
+    const lines = output.split('\n').filter(l => l.trim());
+    const important = lines.filter(l =>
+      /✅|❌|📂|📋|👤|💾|⚠️|🚀|🛑|Error|berhasil|gagal|mode|Login|Sampai|field|terisi|Save|ditutup|ditemukan|terpilih/.test(l)
+    );
+    const summary = important.slice(0, 15).join('\n');
+
+    const fullMsg = `${statusIcon} **KantorKu WFH — ${tglDisplay} ${result.success ? 'BERHASIL' : 'GAGAL'}**\n⏱ ${result.duration} detik\n\n${summary || output}`;
+
+    const MAX_LEN = 4000;
+    if (fullMsg.length <= MAX_LEN) {
+      await bot.sendMessage(chatId, fullMsg, { parse_mode: 'Markdown' });
+    } else {
+      const tmpPath = `/tmp/kantorku-wfh-${Date.now()}.log`;
+      require('fs').writeFileSync(tmpPath, output, 'utf-8');
+      await bot.sendMessage(chatId, `${statusIcon} **KantorKu WFH — ${tglDisplay} ${result.success ? 'BERHASIL' : 'GAGAL'}**\n⏱ ${result.duration} detik\n\n📄 Output terlalu panjang, dikirim sebagai file.`, { parse_mode: 'Markdown' });
+      await bot.sendDocument(chatId, tmpPath);
+      try { require('fs').unlinkSync(tmpPath); } catch (_) {}
+    }
+  } catch (err) {
+    try { await bot.deleteMessage(chatId, statusMsg.message_id); } catch (_) {}
+    await bot.sendMessage(
+      chatId,
+      `❌ **KantorKu WFH Error:**\n${err.message}`,
+      { parse_mode: 'Markdown' }
+    );
+  }
+}
+
+// /kantorku — jalankan WFH dengan tanggal
+bot.onText(/\/kantorku(?:\s+(.+))?/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  if (!isAuthorized(chatId)) {
+    return bot.sendMessage(chatId, '⛔ Anda tidak memiliki akses ke bot ini.');
+  }
+
+  const dateInput = (match[1] || '').trim();
+  if (!dateInput) {
+    // Tanya tanggal
+    return bot.sendMessage(chatId,
+      '📅 **KantorKu WFH**\n\nGunakan:\n`/kantorku YYYY-MM-DD`\n`/kantorku 31 juli`\n`/kantorku 31 juli 2026`\n\nAtau ketik langsung:\n`kantorku wfh tanggal 31 juli`',
+      { parse_mode: 'Markdown' }
+    );
+  }
+
+  // Parse tanggal
+  const parsed = parseIndonesianDate(dateInput);
+  if (parsed) {
+    return runKantorkuWfhTask(chatId, parsed);
+  }
+
+  // Coba format ISO langsung
+  if (/^\d{4}-\d{2}-\d{2}$/.test(dateInput)) {
+    return runKantorkuWfhTask(chatId, dateInput);
+  }
+
+  return bot.sendMessage(chatId, `❌ Format tanggal tidak dikenal: \`${dateInput}\`\nGunakan format \`YYYY-MM-DD\` atau teks seperti \`31 juli 2026\``, { parse_mode: 'Markdown' });
+});
+
 // =============== ABSENSI COMMAND ===============
 
 /**
- * Helper: kirim absensi (teks atau PDF tergantung jumlah data)
+ * Render satu Reply object (dari dispatcher) ke Telegram.
+ * type: 'text' → sendMessage | 'document' → sendDocument | 'menu' → teks + inline keyboard
  */
-async function sendAbsensiResponse(chatId, data, label = 'Absensi TEKO-CAK Hari Ini') {
-  const r = data?.ringkasan;
-  const totalPegawai = r?.total_pegawai || (r?.total) || 0;
+async function renderReply(chatId, reply) {
+  if (!reply) return;
 
-  // Jika data banyak (>15 pegawai), kirim sebagai PDF
-  if (totalPegawai > 15) {
-    const pdfPath = await generateAbsensiPdf(data);
-    const hadir = r?.normal || r?.hadir || 0;
-    const anomali = r?.anomali || r?.absen || 0;
-    const caption = `📋 <b>${label}</b>\n📅 ${data.tanggal || '-'}\n👥 ${totalPegawai} pegawai | ✅ Normal ${hadir}${anomali ? ' | ⚠️ Anomali ' + anomali : ''}`;
-    await bot.sendDocument(chatId, pdfPath, { caption, parse_mode: 'HTML' });
-    try { fs.unlinkSync(pdfPath); } catch (_) {}
+  if (reply.type === 'document') {
+    await bot.sendDocument(chatId, reply.path, {
+      caption: reply.caption,
+      parse_mode: reply.parse_mode,
+    });
+    try { fs.unlinkSync(reply.path); } catch (_) {}
     return;
   }
 
-  // Jika sedikit, kirim teks biasa
-  const formatted = formatAbsensi(data, label);
-  if (formatted.text) {
-    await bot.sendMessage(chatId, formatted.text, { parse_mode: 'HTML' });
-  } else {
-    await bot.sendMessage(chatId, '📭 Tidak ada data absensi.');
+  if (reply.type === 'menu') {
+    const opt = { parse_mode: reply.parse_mode || 'HTML' };
+    if (reply.options && reply.options.length > 0) {
+      opt.reply_markup = { inline_keyboard: reply.options };
+    }
+    await bot.sendMessage(chatId, reply.text, opt);
+    return;
   }
+
+  // type: 'text'
+  const opt = reply.parse_mode ? { parse_mode: reply.parse_mode } : {};
+  await bot.sendMessage(chatId, reply.text, opt);
+}
+
+/**
+ * Helper: kirim absensi (teks atau PDF tergantung jumlah data)
+ * — logika ada di dispatcher.buildAbsensiReply (dipakai bersama WhatsApp)
+ */
+async function sendAbsensiResponse(chatId, data, label = 'Absensi TEKO-CAK Hari Ini') {
+  const reply = await buildAbsensiReply(data, label);
+  await renderReply(chatId, reply);
 }
 
 // /absensi — lihat absensi TEKO-CAK (hari ini atau tanggal tertentu)
@@ -493,95 +639,10 @@ bot.onText(/\/bbm(?:\s+(.+))?/, async (msg, match) => {
  * Deteksi apakah pesan berisi permintaan jadwal rapat
  * Jika ya, langsung query database tanpa lewat AI
  */
-const JADWAL_PATTERNS = [
-  /(jadwal|rapat|agenda|acara)\s+(hari\s*ini|sekarang)/i,
-  /(jadwal|rapat|agenda|acara)\s+(minggu\s*ini|bulan\s*ini)/i,
-  /(tampilkan|munculkan|lihat|cek|tunjukkin|tunjukkan)\s+(semua\s+)?(jadwal|rapat|agenda)/i,
-  /(tampilkan|munculkan|lihat|cek|tunjukkin|tunjukkan)\s+(semua\s+)?(jadwal|rapat|agenda)\s+(tanggal\s+)?(\d{1,2}\s+[a-z]+|\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/]\d{1,2}[-/]\d{4})/i,
-  /(jadwal|rapat|agenda)\s+(tanggal\s+)?(\d{1,2}\s+[a-z]+|\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/]\d{1,2}[-/]\d{4})/i,
-];
-
-const BULAN_MAP = {
-  januari:1,februari:2,maret:3,april:4,mei:5,juni:6,juli:7,agustus:8,september:9,oktober:10,november:11,desember:12,
-  jan:1,feb:2,mar:3,apr:4,jun:6,jul:7,agt:8,sep:9,okt:10,nov:11,des:12,
-};
-
-function parseTanggal(text) {
-  const match = text.match(/(\d{1,2})\s+(januari|februari|maret|april|mei|juni|juli|agustus|september|oktober|november|desember|jan|feb|mar|apr|jun|jul|agt|sep|okt|nov|des)\s*(\d{4})?/i);
-  if (match) {
-    const d = match[1].padStart(2,'0');
-    const m = String(BULAN_MAP[match[2].toLowerCase()]).padStart(2,'0');
-    const y = match[3] || new Date().getFullYear();
-    return `${y}-${m}-${d}`;
-  }
-  return null;
-}
-
-function detectJadwalQuery(text) {
-  const lower = text.toLowerCase();
-
-  // Cek pola jadwal hari ini
-  if (/(jadwal|rapat|agenda).*(hari\s*ini|sekarang)/i.test(lower)) {
-    return { tool: 'get_jadwal_rapat_hari_ini', args: {} };
-  }
-
-  // Cek pola jadwal minggu ini
-  if (/(jadwal|rapat|agenda).*(minggu\s*ini)/i.test(lower)) {
-    return { tool: 'get_jadwal_rapat_minggu_ini', args: {} };
-  }
-
-  // Cek pola semua jadwal / tampilkan semua
-  if (/(tampilkan|munculkan|lihat).*(semua)\s*(jadwal|rapat)/i.test(lower) ||
-      /semua\s*(jadwal|rapat)/i.test(lower)) {
-    return { tool: 'get_semua_jadwal_rapat', args: {} };
-  }
-
-  // Cek pola tanggal spesifik
-  const tanggal = parseTanggal(text);
-  if (tanggal && /(jadwal|rapat|agenda|tampilkan|munculkan)/i.test(lower)) {
-    return { tool: 'get_jadwal_rapat_by_tanggal', args: { tanggal } };
-  }
-
-  // Cek pola dengan angka saja (DD-MM-YYYY atau YYYY-MM-DD)
-  const angkaMatch = text.match(/(\d{4}[-/]\d{1,2}[-/]\d{1,2})|(\d{1,2}[-/]\d{1,2}[-/]\d{4})/);
-  if (angkaMatch && /(jadwal|rapat|agenda|tampilkan|munculkan|tanggal)/i.test(lower)) {
-    return { tool: 'get_jadwal_rapat_by_tanggal', args: { tanggal: angkaMatch[0] } };
-  }
-
-  return null;
-}
+// (JADWAL_PATTERNS, BULAN_MAP, parseTanggal, detectJadwalQuery, detectTugasQuery
+//  → dipindah ke src/core/dispatcher.js — dipakai bersama Telegram & WhatsApp)
 
 /**
- * Deteksi apakah pesan berisi permintaan tugas dari SIJAKA
- */
-function detectTugasQuery(text) {
-  const lower = text.toLowerCase();
-
-  // Cek pola tugas hari ini
-  if (/(tugas|disposisi).*(hari\s*ini|sekarang)/i.test(lower)) {
-    return { tool: 'get_tugas_hari_ini', args: {} };
-  }
-
-  // Cek pola semua tugas
-  if (/(tampilkan|munculkan|lihat).*(semua)\s*(tugas|disposisi)/i.test(lower) ||
-      /semua\s*(tugas|disposisi)/i.test(lower)) {
-    return { tool: 'get_semua_tugas', args: {} };
-  }
-
-  // Cek pola tugas dengan tanggal
-  const tanggal = parseTanggal(text);
-  if (tanggal && /(tugas|disposisi|tampilkan|munculkan)/i.test(lower)) {
-    return { tool: 'get_tugas_by_tanggal', args: { tanggal } };
-  }
-
-  // Cek pola dengan angka
-  const angkaMatch = text.match(/(\d{4}[-/]\d{1,2}[-/]\d{1,2})|(\d{1,2}[-/]\d{1,2}[-/]\d{4})/);
-  if (angkaMatch && /(tugas|disposisi|tampilkan|munculkan|tanggal)/i.test(lower)) {
-    return { tool: 'get_tugas_by_tanggal', args: { tanggal: angkaMatch[0] } };
-  }
-
-  return null;
-}
 
 /**
  * Deteksi apakah pesan berisi perintah TEKO-CAK (tanpa / slash)
@@ -613,226 +674,52 @@ function detectTekocakQuery(text) {
   return null;
 }
 
-/**
- * Deteksi apakah pesan berisi permintaan BBM Non-Fosil
- */
-function detectBbmQuery(text) {
-  const lower = text.toLowerCase().trim();
-
-  // BBM + tanggal (format: DD/MM/YYYY atau teks Indonesia)
-  const bbmWithDate = lower.match(/^bbm(?:\s+non.?fosil)?(?:\s+tanggal)?\s+(.+)/);
-  if (bbmWithDate) {
-    const dateStr = bbmWithDate[1].trim();
-    // Cek apakah itu format tanggal
-    if (/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(dateStr) || /\d{1,2}\s+[a-z]+/.test(dateStr)) {
-      return { tool: 'get_bbm_non_fosil_by_tanggal', args: { tanggal: dateStr } };
-    }
-  }
-
-  if (/^(bbm|bbm non.?fosil|bahan bakar).*(hari.ini|sekarang)/i.test(lower)) {
-    return { tool: 'get_bbm_non_fosil_hari_ini', args: {} };
-  }
-  if (/(bbm|bbm non.?fosil|bahan bakar)/i.test(lower) && /(tampilkan|lihat|cek|munculkan)/i.test(lower)) {
-    return { tool: 'get_bbm_non_fosil_hari_ini', args: {} };
-  }
-  if (lower === 'bbm' || lower === 'bbm hari ini') {
-    return { tool: 'get_bbm_non_fosil_hari_ini', args: {} };
-  }
-
-  return null;
-}
-
-function formatJadwal(rows, title) {
-  if (!rows || rows.length === 0) return { text: null, keyboard: null };
-  if (rows.message) return { text: `📭 ${rows.message}`, keyboard: null };
-
-  let msg = `📅 <b>${title}</b>\n\n`;
-  const keyboard = [];
-
-  rows.forEach((r, i) => {
-    const waktu = r.pukul_mulai ? r.pukul_mulai.slice(0, 5) : '-';
-    msg += `${i + 1}. <b>${r.nama_acara}</b>\n`;
-    msg += `   ⏰ ${waktu}`;
-    if (r.tempat) msg += ` | 📍 ${r.tempat}`;
-    if (r.link_esurat) msg += `\n   🔗 ${r.link_esurat}`;
-    msg += '\n\n';
-    keyboard.push([{ text: `📌 Disposisi #${i + 1}`, callback_data: `disposisi_${r.id}` }]);
-  });
-
-  msg += '<i>Klik tombol di bawah untuk disposisi rapat</i>';
-  return { text: msg, keyboard };
-}
-
-function formatTugas(rows, title) {
-  if (!rows || rows.length === 0) return { text: null, keyboard: null };
-  if (rows.message) return { text: `📭 ${rows.message}`, keyboard: null };
-  if (rows.error) return { text: `⚠️ ${rows.message}`, keyboard: null };
-
-  let msg = `📋 <b>${title}</b>\n\n`;
-  const keyboard = [];
-
-  rows.forEach((r, i) => {
-    const tgl = r.tanggal instanceof Date
-      ? `${String(r.tanggal.getDate()).padStart(2,'0')}/${String(r.tanggal.getMonth()+1).padStart(2,'0')}/${r.tanggal.getFullYear()}`
-      : String(r.tanggal).slice(0,10);
-    const waktu = r.jam ? r.jam.slice(0, 5) : '-';
-    msg += `${i + 1}. ${r.tugas}\n`;
-    msg += `   📅 ${tgl} | ⏰ ${waktu}`;
-    if (r.disposisi_ke) msg += ` | 👤 ${r.disposisi_ke}`;
-    if (r.pegawai) msg += `\n   👥 ${r.pegawai}`;
-    if (r.link_esurat) msg += `\n   🔗 ${r.link_esurat}`;
-    msg += '\n\n';
-    keyboard.push([{ text: `🗑 Hapus #${i + 1}`, callback_data: `hapus_tugas_${r.id}` }]);
-  });
-
-  msg += '<i>Klik 🗑 Hapus untuk menghapus tugas</i>';
-  return { text: msg, keyboard };
-}
-
-function formatBbm(response, title) {
-  // Response API: { success, tanggal, text, data }
-  if (!response) return { text: null, keyboard: null };
-
-  // Jika sukses tapi tidak ada data
-  if (response.success === false) {
-    return { text: `📭 ${response.message || 'Tidak ada data BBM Non-Fosil'}`, keyboard: null };
-  }
-
-  // Jika ada text pre-formatted dari backend (WhatsApp message)
-  if (response.text) {
-    let msg = `🛢️ <b>${title}</b>\n\n`;
-    msg += response.text;
-    return { text: msg, keyboard: null };
-  }
-
-  // Fallback: render dari data
-  if (response.data) {
-    let msg = `🛢️ <b>${title}</b>\n`;
-    if (response.tanggal) msg += `📅 ${response.tanggal}\n`;
-    msg += '\n';
-    msg += Object.entries(response.data)
-      .map(([k, v]) => `• <b>${k}</b>: ${v}`)
-      .join('\n');
-    return { text: msg, keyboard: null };
-  }
-
-  return { text: null, keyboard: null };
-}
+// (detectBbmQuery, formatJadwal, formatTugas, formatBbm
+//  → dipindah ke src/core/dispatcher.js)
 
 // =============== ABSENSI DETECTION & FORMATTER ===============
+// (detectAbsensiQuery, formatAbsensi → dipindah ke src/core/dispatcher.js)
 
 /**
- * Deteksi apakah pesan berisi permintaan absensi TEKO-CAK
+ * Deteksi apakah pesan berisi perintah KantorKu WFH
  */
-function detectAbsensiQuery(text) {
+function detectKantorkuWfhQuery(text) {
   const lower = text.toLowerCase().trim();
 
-  // Pola absensi + tanggal (format: YYYY-MM-DD atau teks Indonesia)
-  const absenWithDate = lower.match(/^(absensi|absen|kehadiran)\s+(.+)/);
-  if (absenWithDate) {
-    let dateStr = absenWithDate[2].trim();
-    // Hapus kata "tanggal " di depan jika ada (misal: "absensi tanggal 13 juli")
-    dateStr = dateStr.replace(/^tanggal\s+/i, '');
-    // Cek apakah itu format tanggal
-    if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr) || /\d{1,2}\s+[a-z]+/.test(dateStr)) {
-      return { tool: 'get_absensi_by_tanggal', args: { tanggal: dateStr } };
+  // Pola: "kantorku wfh tanggal 31 juli" atau "kantorku wfh 31 juli 2026"
+  // atau "kantorku wfh 2026-07-31"
+  const match = lower.match(/^kantorku\s+wfh(?:\s+tanggal)?\s+(.+)/);
+  if (match) {
+    const dateStr = match[1].trim();
+
+    // Format ISO: YYYY-MM-DD
+    if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+      return { tanggal: dateStr };
+    }
+
+    // Format teks Indonesia: "31 juli" atau "31 juli 2026"
+    const tglMatch = dateStr.match(/^(\d{1,2})\s+(januari|februari|maret|april|mei|juni|juli|agustus|september|oktober|november|desember|jan|feb|mar|apr|mei|jun|jul|agt|sep|okt|nov|des)(?:\s+(\d{4}))?$/);
+    if (tglMatch) {
+      const BULAN_MAP = {
+        januari:1,februari:2,maret:3,april:4,mei:5,juni:6,juli:7,agustus:8,september:9,oktober:10,november:11,desember:12,
+        jan:1,feb:2,mar:3,apr:4,mei:5,jun:6,jul:7,agt:8,sep:9,okt:10,nov:11,des:12,
+      };
+      const d = tglMatch[1].padStart(2, '0');
+      const m = String(BULAN_MAP[tglMatch[2].toLowerCase()]).padStart(2, '0');
+      const y = tglMatch[3] || String(new Date().getFullYear());
+      return { tanggal: `${y}-${m}-${d}` };
     }
   }
 
-  // Pola: "absensi hari ini", "absen hari ini", "absensi now"
-  if (/(absensi|absen|kehadiran)\s*(hari\s*ini|sekarang|today)/i.test(lower)) {
-    return { tool: 'get_absensi_today', args: {} };
-  }
-  if (/^(absensi|absen|kehadiran)$/.test(lower)) {
-    return { tool: 'get_absensi_today', args: {} };
-  }
-  if (/(tampilkan|lihat|cek|munculkan)\s*(absensi|absen|kehadiran)/i.test(lower)) {
-    return { tool: 'get_absensi_today', args: {} };
-  }
-
-  // Pola: "absensi tanggal 13 juli" atau "absensi 13 juli 2026"
-  const absenTgl = lower.match(/^(absensi|absen|kehadiran)\s+(tanggal\s+)?(\d{1,2}\s+[a-z]+(?:\s+\d{4})?)$/);
-  if (absenTgl) {
-    return { tool: 'get_absensi_by_tanggal', args: { tanggal: absenTgl[3] } };
-  }
-
-  // Pola: "absensi 2026-07-13" (format YYYY-MM-DD)
-  const absenIso = lower.match(/^(absensi|absen|kehadiran)\s+(\d{4}-\d{2}-\d{2})$/);
-  if (absenIso) {
-    return { tool: 'get_absensi_by_tanggal', args: { tanggal: absenIso[2] } };
+  // Pola: "kantorku wfh" saja (tanpa tanggal)
+  if (/^kantorku\s+wfh$/.test(lower)) {
+    return { tanggal: null }; // akan pakai tanggal hari ini
   }
 
   return null;
 }
 
-/**
- * Format data absensi ke HTML untuk Telegram
- * Response API (format baru):
- * {
- *   success, tanggal,
- *   ringkasan: { total_pegawai, normal, anomali, rincian_masalah },
- *   anomali: [{ nip, nama, jam_masuk, jam_pulang, keterangan, masalah: [] }]
- * }
- * Normal pegawai hanya ada hitungan di ringkasan.normal (tanpa detail array)
- */
-function formatAbsensi(response, title = 'Absensi TEKO-CAK Hari Ini') {
-  if (!response) return { text: null, keyboard: null };
-
-  // Jika error
-  if (response.success === false) {
-    return { text: `📭 ${response.message || 'Tidak ada data absensi'}`, keyboard: null };
-  }
-
-  let msg = `📋 <b>${title}</b>\n`;
-  if (response.tanggal) msg += `📅 ${response.tanggal}\n`;
-
-  // Ringkasan (format baru: total_pegawai, normal, anomali)
-  if (response.ringkasan) {
-    const r = response.ringkasan;
-    msg += `👥 Total: ${r.total_pegawai || 0} pegawai\n`;
-    msg += `✅ Normal: ${r.normal || 0} pegawai\n`;
-    msg += `⚠️ Anomali: ${r.anomali || 0} pegawai\n`;
-    if (r.rincian_masalah) {
-      const rm = r.rincian_masalah;
-      const parts = [];
-      if (rm.jam_sama) parts.push(`🕐 jam sama ${rm.jam_sama}`);
-      if (rm.keterangan_M) parts.push(`📌 Mangkir ${rm.keterangan_M}`);
-      if (rm.keterangan_bintang) parts.push(`* ${rm.keterangan_bintang}`);
-      if (rm.tanpa_jam) parts.push(`⏺ tanpa jam ${rm.tanpa_jam}`);
-      if (parts.length) msg += `📊 ${parts.join(' | ')}\n`;
-    }
-    msg += `\n`;
-  }
-
-  // Daftar anomali (format baru — array anomali dengan detail masalah)
-  if (response.anomali && response.anomali.length > 0) {
-    msg += `<u>⚠️ ANOMALI (${response.anomali.length})</u>\n\n`;
-    const MAX_SHOW = 15;
-    const list = response.anomali.slice(0, MAX_SHOW);
-    list.forEach((r, i) => {
-      const label = r.keterangan === 'H' ? 'Hadir' : r.keterangan === 'M' ? 'Mangkir' : r.keterangan || '';
-      msg += `<b>${i + 1}. ${r.nama || '-'}</b>\n`;
-      msg += `   🆔 NIP: ${r.nip || '-'}\n`;
-      if (r.jam_masuk) msg += `   🟢 Masuk: ${r.jam_masuk}\n`;
-      if (r.jam_pulang) msg += `   🔴 Pulang: ${r.jam_pulang}\n`;
-      if (label) msg += `   📌 ${label}\n`;
-      if (r.masalah && r.masalah.length > 0) {
-        r.masalah.forEach(m => msg += `   ⚡ ${m}\n`);
-      }
-      msg += '\n';
-    });
-    const remaining = response.anomali.length - MAX_SHOW;
-    if (remaining > 0) {
-      msg += `... dan ${remaining} anomali lainnya\n\n`;
-    }
-  }
-
-  if (msg.length <= 50) {
-    return { text: null, keyboard: null };
-  }
-
-  return { text: msg, keyboard: null };
-}
+// (formatAbsensi → dipindah ke src/core/dispatcher.js)
 
 // =============== TEXT MESSAGE HANDLER (Natural Language via AI) ===============
 
@@ -845,7 +732,8 @@ async function sendTypingAction(chatId) {
   }
 }
 
-// Handler untuk pesan teks biasa — diproses oleh AI
+// Handler untuk pesan teks biasa — jadwal/tugas/BBM/absensi/AI lewat core dispatcher
+// (sama persis yang dipakai WhatsApp — satu logika, dua channel)
 bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
   const text = msg.text || '';
@@ -884,60 +772,10 @@ bot.on('message', async (msg) => {
       );
     }
 
-    // Cek apakah ini query jadwal — jika ya, proses langsung tanpa AI
-    const jadwalQuery = detectJadwalQuery(text);
-    if (jadwalQuery) {
-      const result = await executeTool(jadwalQuery.tool, jadwalQuery.args);
-      const titles = {
-        get_jadwal_rapat_hari_ini: 'Jadwal Rapat Hari Ini 📆',
-        get_jadwal_rapat_minggu_ini: 'Jadwal Rapat Minggu Ini 📆',
-        get_jadwal_rapat_by_tanggal: `Jadwal Rapat ${jadwalQuery.args.tanggal || ''} 📆`,
-        get_semua_jadwal_rapat: 'Semua Jadwal Rapat 📆',
-      };
-      const formatted = formatJadwal(result, titles[jadwalQuery.tool] || 'Jadwal Rapat');
-
-      try { await bot.deleteMessage(chatId, waitMsg.message_id); } catch (_) {}
-
-      if (formatted.text) {
-        const opt = { parse_mode: 'HTML' };
-        if (formatted.keyboard && formatted.keyboard.length > 0) {
-          opt.reply_markup = { inline_keyboard: formatted.keyboard };
-        }
-        return await bot.sendMessage(chatId, formatted.text, opt);
-      } else {
-        return await bot.sendMessage(chatId, '📭 Tidak ada jadwal rapat.');
-      }
-    }
-
-    // Cek apakah ini query tugas — jika ya, proses langsung tanpa AI
-    const tugasQuery = detectTugasQuery(text);
-    if (tugasQuery) {
-      const result = await executeTool(tugasQuery.tool, tugasQuery.args);
-      const titles = {
-        get_tugas_hari_ini: 'Tugas Hari Ini 📋',
-        get_tugas_by_tanggal: `Tugas ${tugasQuery.args.tanggal || ''} 📋`,
-        get_semua_tugas: 'Semua Tugas 📋',
-      };
-      const formatted = formatTugas(result, titles[tugasQuery.tool] || 'Tugas');
-
-      try { await bot.deleteMessage(chatId, waitMsg.message_id); } catch (_) {}
-
-      if (formatted.text) {
-        const opt = { parse_mode: 'HTML' };
-        if (formatted.keyboard && formatted.keyboard.length > 0) {
-          opt.reply_markup = { inline_keyboard: formatted.keyboard };
-        }
-        return await bot.sendMessage(chatId, formatted.text, opt);
-      } else {
-        return await bot.sendMessage(chatId, '📭 Tidak ada tugas.');
-      }
-    }
-
-    // Cek apakah ini perintah TEKO-CAK (tanpa /)
+    // Cek perintah TEKO-CAK tanpa slash (Telegram-only — Fase 3 untuk WA)
     const tekocakQuery = detectTekocakQuery(text);
     if (tekocakQuery) {
       try { await bot.deleteMessage(chatId, waitMsg.message_id); } catch (_) {}
-
       const labels = {
         all: 'Semua Task',
         login: 'Login',
@@ -947,69 +785,20 @@ bot.on('message', async (msg) => {
       return runTekocakTask(chatId, tekocakQuery.task, labels[tekocakQuery.task] || tekocakQuery.task, tekocakQuery.nip);
     }
 
-    // Cek apakah ini query BBM Non-Fosil
-    const bbmQuery = detectBbmQuery(text);
-    if (bbmQuery) {
+    // Cek perintah KantorKu WFH tanpa slash (Telegram-only)
+    const kantorkuQuery = detectKantorkuWfhQuery(text);
+    if (kantorkuQuery) {
       try { await bot.deleteMessage(chatId, waitMsg.message_id); } catch (_) {}
-      try {
-        const result = await executeTool(bbmQuery.tool, bbmQuery.args);
-        const formatted = formatBbm(result, 'BBM Non-Fosil Hari Ini 🛢️');
-        if (formatted.text) {
-          return await bot.sendMessage(chatId, formatted.text, { parse_mode: 'HTML' });
-        } else {
-          return await bot.sendMessage(chatId, '📭 Tidak ada data BBM Non-Fosil.');
-        }
-      } catch (err) {
-        return await bot.sendMessage(
-          chatId,
-          `⏳ *BBM Non-Fosil*\n\nServer sedang sibuk, coba lagi nanti ya.\n\n${err.message.includes('timeout') ? '⚠️ Koneksi timeout — mungkin data masih diproses di backend.' : `❌ ${err.message}`}`,
-          { parse_mode: 'Markdown' }
-        );
-      }
+      const tanggal = kantorkuQuery.tanggal || new Date().toISOString().slice(0, 10);
+      return runKantorkuWfhTask(chatId, tanggal);
     }
 
-    // Cek apakah ini query absensi TEKO-CAK
-    const absensiQuery = detectAbsensiQuery(text);
-    if (absensiQuery) {
-      try { await bot.deleteMessage(chatId, waitMsg.message_id); } catch (_) {}
-      try {
-        const result = await executeTool(absensiQuery.tool, absensiQuery.args);
-        const label = absensiQuery.tool === 'get_absensi_by_tanggal'
-          ? `Absensi TEKO-CAK ${result.tanggal || absensiQuery.args.tanggal || ''}`
-          : 'Absensi TEKO-CAK Hari Ini';
-        await sendAbsensiResponse(chatId, result, label);
-        return;
-      } catch (err) {
-        return await bot.sendMessage(
-          chatId,
-          `❌ *Absensi Error:* ${err.message}`,
-          { parse_mode: 'Markdown' }
-        );
-      }
+    // Sisanya → core dispatcher (jadwal/tugas/BBM/absensi/AI)
+    try { await bot.deleteMessage(chatId, waitMsg.message_id); } catch (_) {}
+    const replies = await handleMessage({ text, userId: chatId, authorized: true, channel: 'telegram' });
+    for (const reply of replies) {
+      await renderReply(chatId, reply);
     }
-
-    // Jika bukan query database, lanjutkan ke AI
-    // Simpan pesan user ke riwayat
-    addMessage(chatId, 'user', text);
-
-    // Ambil riwayat percakapan untuk konteks
-    const history = getHistory(chatId);
-
-    // Kirim ke AI via OpenRouter
-    const reply = await askAI(text, history);
-
-    // Hapus pesan "sedang memproses"
-    try {
-      await bot.deleteMessage(chatId, waitMsg.message_id);
-    } catch (_) {
-      // Abaikan jika gagal hapus (misal sudah kehapus)
-    }
-
-    // Simpan respons AI ke riwayat
-    addMessage(chatId, 'assistant', reply);
-
-    // Kirim balasan ke user
-    await bot.sendMessage(chatId, reply, { parse_mode: 'Markdown' });
   } catch (error) {
     console.error('❌ Error memproses pesan:', error.message);
     await bot.sendMessage(
@@ -1155,6 +944,7 @@ Kamu bisa ngobrol dengan bahasa alami, tidak perlu perintah kaku.
 /status — Cek status bot
 /info — Info akun kamu
 /tekocak — Automasi absensi TEKO-CAK
+/kantorku — Automasi KantorKu WFH
 /absensi — Cek absensi TEKO-CAK hari ini
 /bbm — Cek BBM Non-Fosil
 

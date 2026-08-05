@@ -7,7 +7,7 @@
 
 const { chromium } = require('playwright');
 const { loginThenRun } = require('./_helper');
-const { HALAMAN_PEGAWAI, INSTANSI, DAFTAR_NIP } = require('../config');
+const { HALAMAN_PEGAWAI, INSTANSI, DAFTAR_NIP, HEADLESS } = require('../config');
 
 async function run(page, browser, nipList = null) {
   console.log('');
@@ -34,21 +34,21 @@ async function run(page, browser, nipList = null) {
 
     try {
       // Reload halaman untuk state bersih
-      await page.goto(HALAMAN_PEGAWAI, { waitUntil: 'networkidle', timeout: 30000 }).catch(() => {});
+      await page.goto(HALAMAN_PEGAWAI, { waitUntil: 'load', timeout: 30000 });
       await page.locator('select').filter({ hasText: INSTANSI.substring(0, 20) }).selectOption(INSTANSI);
-      await page.waitForTimeout(1500);
+      await page.waitForTimeout(800);
 
       const input = page.locator('#pegawai_autocomplete');
       await input.fill(nip);
-      await page.waitForTimeout(2000);
+      await page.waitForTimeout(1000);
 
       // Pilih autocomplete
       await input.focus();
-      await page.waitForTimeout(300);
+      await page.waitForTimeout(200);
       await input.press('ArrowDown');
-      await page.waitForTimeout(500);
+      await page.waitForTimeout(300);
       await input.press('Enter');
-      await page.waitForTimeout(2000);
+      await page.waitForTimeout(1000);
 
       const selected = await input.inputValue();
       console.log(`      ✓ ${selected}`);
@@ -68,10 +68,7 @@ async function run(page, browser, nipList = null) {
         } catch { /* ok */ }
         console.log('      ✓ Tab baru ditutup.');
       } else {
-        // Cek apakah halaman sudah pindah
         await page.waitForTimeout(3000);
-        // Kembalikan ke halaman pegawai
-        await page.goto(HALAMAN_PEGAWAI, { waitUntil: 'networkidle', timeout: 30000 }).catch(() => {});
       }
     } catch (err) {
       const errMsg = err.message.split('\n')[0];
@@ -79,18 +76,26 @@ async function run(page, browser, nipList = null) {
       console.log('      ➜ Skip');
       failedNips.push(nip);
 
-      // Jika page sudah closed, buat page baru dari browser
-      if (errMsg.includes('closed')) {
+      // Recovery: kalo page/context closed, bikin baru dari browser & login ulang
+      if (errMsg.includes('closed') || errMsg.includes('Timeout')) {
         try {
-          page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
-          await page.goto(HALAMAN_PEGAWAI, { waitUntil: 'networkidle', timeout: 30000 }).catch(() => {});
-          await page.locator('select').filter({ hasText: INSTANSI.substring(0, 20) }).selectOption(INSTANSI);
-          await page.waitForTimeout(1500);
-          console.log('      ↻ Page baru dibuat & login ulang.');
+          await browser.close();
         } catch { /* ok */ }
+        browser = await chromium.launch({
+          headless: HEADLESS !== undefined ? HEADLESS : true,
+          args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
+        });
+        page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+
+        // Login ulang karena browser baru
+        const login = require('./login');
+        await login.run(page);
+        await page.goto(HALAMAN_PEGAWAI, { waitUntil: 'load', timeout: 30000 });
+        await page.locator('select').filter({ hasText: INSTANSI.substring(0, 20) }).selectOption(INSTANSI);
+        console.log('      ↻ Browser baru + login ulang.');
       } else {
-        // Pull page back
-        try { await page.goto(HALAMAN_PEGAWAI, { timeout: 30000 }).catch(() => {}); } catch { /* ok */ }
+        // Coba navigasi balik
+        try { await page.goto(HALAMAN_PEGAWAI, { timeout: 30000 }); } catch { /* ok */ }
       }
     }
   }

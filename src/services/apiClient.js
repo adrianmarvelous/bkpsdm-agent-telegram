@@ -20,6 +20,32 @@ let authToken = null;
 let tokenExpiry = 0;
 
 /**
+ * Parse response sebagai JSON dengan aman.
+ *
+ * Server kadang balikin HTML (halaman error nginx 502/504) padahal kita minta JSON.
+ * Deteksi itu dan lempar pesan yang jelas, bukan error "Unexpected token '<'" mentah.
+ */
+async function parseJsonResponse(res, endpoint) {
+  const text = await res.text();
+  const trimmed = text.trim();
+
+  if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) {
+    const snippet = trimmed.replace(/\s+/g, ' ').slice(0, 100);
+    if (res.status >= 500) {
+      throw new Error(
+        `⚠️ Server BKPSDM sedang sibuk (HTTP ${res.status}) — coba lagi beberapa saat nanti. (${snippet})`
+      );
+    }
+    throw new Error(`Respons dari ${endpoint} bukan JSON (HTTP ${res.status}): ${snippet}`);
+  }
+
+  return JSON.parse(trimmed);
+}
+
+/** Delay kecil sebelum retry */
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
  * Login ke API backend untuk mendapatkan Bearer token
  */
 async function login() {
@@ -29,18 +55,31 @@ async function login() {
   }
 
   try {
-    const res = await fetch(`${BASE_URL}/auth/login.php`, {
+    let res = await fetch(`${BASE_URL}/auth/login.php`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username: API_USERNAME, password: API_PASSWORD }),
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });
 
-    if (!res.ok) {
-      throw new Error(`Login gagal: HTTP ${res.status}`);
+    // Retry sekali untuk error 5xx (server sibuk / nginx timeout)
+    if (res.status >= 500) {
+      console.log(`🔄 Login: server sibuk (HTTP ${res.status}), retry sekali...`);
+      await sleep(3000);
+      res = await fetch(`${BASE_URL}/auth/login.php`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: API_USERNAME, password: API_PASSWORD }),
+        signal: AbortSignal.timeout(TIMEOUT_MS),
+      });
     }
 
-    const data = await res.json();
+    const data = await parseJsonResponse(res, '/auth/login.php');
+
+    if (!res.ok) {
+      throw new Error(data.error || `Login gagal: HTTP ${res.status}`);
+    }
+
     authToken = data.token;
     // Asumsi token berlaku 24 jam, refresh 1 jam sebelum expired
     tokenExpiry = Date.now() + 23 * 60 * 60 * 1000;
@@ -98,7 +137,14 @@ async function request(method, path, body = null) {
     res = await fetch(url, options);
   }
 
-  const data = await res.json();
+  // Retry sekali untuk error 5xx (server sibuk / nginx timeout 504)
+  if (res.status >= 500) {
+    console.log(`🔄 Server sibuk (HTTP ${res.status}), retry sekali...`);
+    await sleep(3000);
+    res = await fetch(url, options);
+  }
+
+  const data = await parseJsonResponse(res, path);
 
   if (!res.ok) {
     throw new Error(data.error || `HTTP ${res.status}: ${res.statusText}`);

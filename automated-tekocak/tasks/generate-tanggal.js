@@ -1,28 +1,54 @@
 /**
- * Task 2: Generate Laporan
+ * Task: Generate Laporan untuk Tanggal Spesifik
  *
- * Standalone (login otomatis): node tasks/generate.js
- * Terintegrasi (sudah login):  panggil generate.run(page)
+ * Perintah baru (dari Telegram): /tekocak generate tanggal <tanggal>
+ * — tgl_mulai DAN tgl_akhir diisi tanggal yang sama (generate 1 hari).
+ *
+ * Sengaja TERPISAH dari tasks/generate.js (yang selalu H-1 → hari ini)
+ * agar perintah awal "generate" tidak berubah sama sekali.
+ *
+ * Standalone (login otomatis):
+ *   node tasks/generate-tanggal.js YYYY-MM-DD
+ * Terintegrasi (sudah login):
+ *   generateTanggal.run(page, 'YYYY-MM-DD')
  */
 
 const { chromium } = require('playwright');
 const { loginThenRun } = require('./_helper');
 const { HALAMAN_GENERATE } = require('../config');
 
-async function run(page) {
+/**
+ * Format "YYYY-MM-DD" → "DD/MM/YYYY" untuk form TEKO-CAK.
+ * Validasi tanggal real juga (mis. 2026-02-31 → null).
+ *
+ * @param {string} tanggal Format YYYY-MM-DD
+ * @returns {string|null} DD/MM/YYYY atau null kalau tidak valid
+ */
+function formatTglKeForm(tanggal) {
+  if (!tanggal) return null;
+  const m = String(tanggal).trim().match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (!m) return null;
+  const [, y, mo, d] = m;
+  const dt = new Date(Number(y), Number(mo) - 1, Number(d));
+  const valid =
+    dt.getFullYear() === Number(y) &&
+    dt.getMonth() === Number(mo) - 1 &&
+    dt.getDate() === Number(d);
+  if (!valid) return null;
+  return `${d.padStart(2, '0')}/${mo.padStart(2, '0')}/${y}`;
+}
+
+async function run(page, tanggal) {
+  const tglForm = formatTglKeForm(tanggal);
+  if (!tglForm) {
+    throw new Error(`Tanggal tidak valid: ${tanggal} (format: YYYY-MM-DD)`);
+  }
+
   console.log('');
   console.log('═══════════════════════════════════════');
-  console.log('  TASK 2: GENERATE LAPORAN');
+  console.log('  TASK: GENERATE LAPORAN (TANGGAL SPESIFIK)');
   console.log('═══════════════════════════════════════');
-
-  const now = new Date();
-  const yesterday = new Date(now);
-  yesterday.setDate(yesterday.getDate() - 1);
-  const month = String(now.getMonth() + 1).padStart(2, '0');
-  const day = String(now.getDate()).padStart(2, '0');
-  const year = now.getFullYear();
-  const tglMulai = `${String(yesterday.getDate()).padStart(2, '0')}/${String(yesterday.getMonth() + 1).padStart(2, '0')}/${yesterday.getFullYear()}`;
-  const tglAkhir = `${day}/${month}/${year}`;
+  console.log(`  📅 Tanggal: ${tglForm} (mulai = akhir)`);
 
   await page.goto(HALAMAN_GENERATE, { waitUntil: 'load', timeout: 60000 });
 
@@ -30,23 +56,25 @@ async function run(page) {
   await page.locator('select').nth(1).selectOption('By : Instansi');
   await page.waitForTimeout(1500);
 
-  console.log(`  [2] Isi tanggal: ${tglMulai} - ${tglAkhir}`);
-  await page.evaluate(v => { const e = document.querySelector('#tgl_mulai'); if(e){e.value=v;e.dispatchEvent(new Event('change',{bubbles:true}));} }, tglMulai);
-  await page.evaluate(v => { const e = document.querySelector('#tgl_akhir'); if(e){e.value=v;e.dispatchEvent(new Event('change',{bubbles:true}));} }, tglAkhir);
+  console.log(`  [2] Isi tanggal: ${tglForm} - ${tglForm}`);
+  await page.evaluate(v => { const e = document.querySelector('#tgl_mulai'); if(e){e.value=v;e.dispatchEvent(new Event('change',{bubbles:true}));} }, tglForm);
+  await page.evaluate(v => { const e = document.querySelector('#tgl_akhir'); if(e){e.value=v;e.dispatchEvent(new Event('change',{bubbles:true}));} }, tglForm);
   await page.waitForTimeout(500);
 
   console.log('  [3] Klik Generate & tunggu...');
   await page.locator('#modal_generate_instansi button:has-text("Generate")').click();
 
   // ===== PANTAU PROGRESS (Bootstrap modal #pesan_modal) =====
+  // NOTE: lastPct/totalData dideklarasikan DI LUAR try — di generate.js asli
+  // mereka di dalam try, sehingga catch block bisa kena ReferenceError.
+  let lastPct = -1;
+  let totalData = 0;
   try {
     // Tunggu modal progress sebentar
     await page.waitForSelector('#pesan_modal.in, #pesan_modal.show', { timeout: 8000 });
     console.log('     [Modal progress muncul]');
 
     // Baca progress pertama KALI (0%) langsung
-    let lastPct = -1;
-    let totalData = 0;
     const firstTxt = await page.evaluate(() => {
       try { const s = document.querySelector('#proses-data'); return s ? s.textContent || '' : ''; }
       catch { return ''; }
@@ -116,7 +144,13 @@ async function run(page) {
 
 // ===== Standalone =====
 if (require.main === module) {
-  loginThenRun(run, 'Generate Laporan');
+  const tanggal = process.argv[2];
+  if (!tanggal || !formatTglKeForm(tanggal)) {
+    console.error('❌ Usage: node tasks/generate-tanggal.js YYYY-MM-DD');
+    console.error('   Contoh: node tasks/generate-tanggal.js 2026-08-04');
+    process.exit(1);
+  }
+  loginThenRun((page) => run(page, tanggal), `Generate Laporan (${tanggal})`);
 }
 
-module.exports = { run, nama: 'Generate Laporan' };
+module.exports = { run, nama: 'Generate Laporan Tanggal Spesifik', formatTglKeForm };

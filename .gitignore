@@ -1,3 +1,7 @@
 node_modules/
 .env
 *.log
+
+# WhatsApp session & QR (jangan pernah di-commit!)
+src/whatsapp/auth_info/
+src/whatsapp/qr-code.png
