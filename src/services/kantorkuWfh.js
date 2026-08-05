@@ -24,20 +24,8 @@ async function runWfh(tanggal) {
       HEADLESS: 'true',
     };
 
-    // Baca .env dari folder kantorku-wfh
-    const envPath = path.join(KANTORKU_DIR, '.env');
-    if (require('fs').existsSync(envPath)) {
-      const content = require('fs').readFileSync(envPath, 'utf-8');
-      for (const line of content.split('\n')) {
-        const trimmed = line.trim();
-        if (!trimmed || trimmed.startsWith('#')) continue;
-        const eqIdx = trimmed.indexOf('=');
-        if (eqIdx === -1) continue;
-        const key = trimmed.slice(0, eqIdx).trim();
-        const val = trimmed.slice(eqIdx + 1).trim().replace(/^["']|["']$/g, '');
-        if (!env[key]) env[key] = val;
-      }
-    }
+    // Env sudah digabung ke root .env (di-load entry index.js) — KANTORKU_*
+    // otomatis ada di process.env dan ikut ke proses anak.
 
     const child = spawn('node', ['index.js', tanggal], {
       cwd: KANTORKU_DIR,

@@ -5,14 +5,15 @@
  *   node index.js 2026-07-31          → isi WFH tanggal 31 Juli 2026
  *   HEADLESS=true node index.js ...   → mode headless (VPS)
  */
-require('dotenv').config();
+require('dotenv').config({ path: require('path').resolve(__dirname, '..', '.env') });
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const { chromium } = require('playwright');
 
-const NIK = process.env.NIK;
-const PASSWORD = process.env.PASSWORD;
+// KANTORKU_* (root .env) dengan fallback nama lama untuk backward-compat
+const NIK = process.env.KANTORKU_NIK || process.env.NIK;
+const PASSWORD = process.env.KANTORKU_PASSWORD || process.env.PASSWORD;
 const HEADLESS = process.env.HEADLESS !== 'false'; // default headless
 const LOGIN_URL = 'https://kantorku.surabaya.go.id/login';
 const WFA_URL = 'https://kantorku.surabaya.go.id/admin?modul=wfa&child=jadwal_wfa';
@@ -20,8 +21,8 @@ const CSV_PATH = path.join(__dirname, 'pegawai bkd non prigen.csv');
 const CSV_ENC_PATH = path.join(__dirname, 'pegawai bkd non prigen.csv.enc');
 const TANGGAL_WFH = process.argv[2];
 
-// Enkripsi key (sama dengan CSV_ENCRYPT_KEY di automated-tekocak)
-const CSV_KEY = 'Tek0Cak_Enkrip2026!';
+// Key enkripsi CSV — dari root .env (KANTORKU_CSV_KEY), fallback ke nilai lama
+const CSV_KEY = process.env.KANTORKU_CSV_KEY || 'Tek0Cak_Enkrip2026!';
 
 function decryptCsv(encryptedData) {
   const key = crypto.createHash('sha256').update(CSV_KEY).digest();

@@ -12,8 +12,8 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-// Load .env manual (biar ga dependen ke dotenv)
-const envPath = path.join(__dirname, '..', '.env');
+// Load .env manual (biar ga dependen ke dotenv) — root .env (semua env digabung)
+const envPath = path.join(__dirname, '..', '..', '.env');
 if (fs.existsSync(envPath)) {
   const lines = fs.readFileSync(envPath, 'utf-8').split('\n');
   for (const line of lines) {

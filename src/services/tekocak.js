@@ -18,10 +18,10 @@ const fs = require('fs');
 const TEKOCAK_DIR = path.resolve(__dirname, '../../automated-tekocak');
 
 /**
- * Load env dari automated-tekocak/.env dan merge ke process.env
+ * Load env dari root .env (semua env sudah digabung ke root)
  */
 function ensureTekocakEnv() {
-  const envPath = path.join(TEKOCAK_DIR, '.env');
+  const envPath = path.join(TEKOCAK_DIR, '..', '.env');
   if (!fs.existsSync(envPath)) return false;
 
   const content = fs.readFileSync(envPath, 'utf-8');
@@ -63,7 +63,7 @@ async function runTask(taskName, onProgress = () => {}, nip = null, tanggal = nu
   const lines = [];
   const log = (msg) => { lines.push(msg); onProgress(msg); };
 
-  // Load env dari automated-tekocak/.env
+  // Load env dari root .env (sudah digabung)
   ensureTekocakEnv();
 
   // Load config — pindah cwd dulu agar dotenv.config() menemukan .env
@@ -85,7 +85,7 @@ async function runTask(taskName, onProgress = () => {}, nip = null, tanggal = nu
       output: [
         '❌ **TEKO-CAK belum dikonfigurasi!**',
         '',
-        'Buat file `automated-tekocak/.env` dengan isi:',
+        'Buat file `.env` (root project) dengan isi:',
         '```',
         'TEKOCAK_URL=https://teko-cak.surabaya.go.id',
         'TEKOCAK_USERNAME=username_anda',
