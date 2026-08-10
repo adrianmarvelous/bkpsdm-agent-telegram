@@ -5,3 +5,19 @@ node_modules/
 # WhatsApp session & QR (jangan pernah di-commit!)
 src/whatsapp/auth_info/
 src/whatsapp/qr-code.png
+
+# File data sensitif — jangan pernah di-commit!
+# (CSV plaintext data pegawai: NIP/NIK/No WA)
+*.csv
+decrypted.*
+combined.bin
+
+# Pengaduan Listener — state/session jangan di-commit
+automated-pengaduan-listener/session.json
+automated-pengaduan-listener/state.json
+automated-pengaduan-listener/pending_captcha.json
+automated-pengaduan-listener/captcha_answer.txt
+
+# File test / percobaan sekali pakai
+test_*.js
+src/services/tekocak_new.js

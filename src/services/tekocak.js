@@ -14,6 +14,7 @@
 const { chromium } = require('playwright');
 const path = require('path');
 const fs = require('fs');
+const fetch = require('node-fetch');
 
 const TEKOCAK_DIR = path.resolve(__dirname, '../../automated-tekocak');
 
@@ -31,7 +32,7 @@ function ensureTekocakEnv() {
     const eqIdx = trimmed.indexOf('=');
     if (eqIdx === -1) continue;
     const key = trimmed.slice(0, eqIdx).trim();
-    const val = trimmed.slice(eqIdx + 1).trim().replace(/^["']|["']$/g, '');
+    const val = trimmed.slice(eqIdx + 1).trim().replace(/^[\"']|[\"']$/g, '');
     if (!process.env[key]) {
       process.env[key] = val;
     }
@@ -47,6 +48,131 @@ function formatDuration(seconds) {
   const m = Math.floor(seconds / 60);
   const s = Math.round(seconds % 60);
   return `${m} menit ${s} detik`;
+}
+
+/**
+ * Simple API client for master-pegawai endpoints (reuse .env credentials)
+ */
+class MasterPegawaiApi {
+  constructor() {
+    this.baseUrl = process.env.API_BASE_URL || 'https://bkpsdm.surabaya.go.id/api/ai-agent';
+    this.username = process.env.API_USERNAME;
+    this.password = process.env.API_PASSWORD;
+    this.timeoutMs = 120000;
+    this.authToken = null;
+    this.tokenExpiry = 0;
+  }
+
+  async parseJsonResponse(res, endpoint) {
+    const text = await res.text();
+    const trimmed = text.trim();
+
+    if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) {
+      const snippet = trimmed.replace(/\s+/g, ' ').slice(0, 120);
+      if (res.status >= 500) {
+        throw new Error(`⚠️ Server BKPSDM sibuk (HTTP ${res.status}) – coba lagi nanti. (${snippet})`);
+      }
+      throw new Error(`Respons dari ${endpoint} bukan JSON (HTTP ${res.status}): ${snippet}`);
+    }
+    return JSON.parse(trimmed);
+  }
+
+  async login() {
+    if (!this.username || !this.password) {
+      throw new Error('API_USERNAME / API_PASSWORD tidak dikonfigurasi di .env');
+    }
+
+    let res = await fetch(`${this.baseUrl}/auth/login.php`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: this.username, password: this.password }),
+      signal: AbortSignal.timeout(this.timeoutMs),
+    });
+
+    // Retry once for 5xx
+    if (res.status >= 500) {
+      await new Promise(r => setTimeout(r, 3000));
+      res = await fetch(`${this.baseUrl}/auth/login.php`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: this.username, password: this.password }),
+        signal: AbortSignal.timeout(this.timeoutMs),
+      });
+    }
+
+    const data = await this.parseJsonResponse(res, '/auth/login.php');
+    if (!res.ok) throw new Error(data.error || `Login gagal: HTTP ${res.status}`);
+
+    this.authToken = data.token;
+    // Assume token valid for 1 hour (expiresIn from response usually 3600s)
+    this.tokenExpiry = Date.now() + 55 * 60 * 1000; // refresh 5 min before expiry
+    console.log('✅ API Login berhasil, token tersimpan');
+  }
+
+  async ensureToken() {
+    if (!this.authToken && this.username && this.password) await this.login();
+    if (this.authToken && Date.now() > this.tokenExpiry && this.username && this.password) {
+      console.log('🔄 Token expired, login ulang...');
+      await this.login();
+    }
+  }
+
+  async request(method, path, body = null) {
+    await this.ensureToken();
+
+    const url = `${this.baseUrl}${path}`;
+    const headers = { 'Content-Type': 'application/json' };
+    if (this.authToken) headers['Authorization'] = `Bearer ${this.authToken}`;
+
+    const options = { method, headers, signal: AbortSignal.timeout(this.timeoutMs) };
+    if (body) options.body = JSON.stringify(body);
+
+    let res = await fetch(url, options);
+
+    // 401 → retry login once
+    if (res.status === 401 && this.username && this.password) {
+      console.log('🔄 Token ditolak (401), login ulang...');
+      await this.login();
+      headers['Authorization'] = `Bearer ${this.authToken}`;
+      res = await fetch(url, options);
+    }
+
+    // Retry once for 5xx
+    if (res.status >= 500) {
+      console.log(`🔄 Server sibuk (HTTP ${res.status}), retry sekali...`);
+      await new Promise(r => setTimeout(r, 3000));
+      res = await fetch(url, options);
+    }
+
+    const data = await this.parseJsonResponse(res, path);
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}: ${res.statusText}`);
+    return data;
+  }
+
+  async fetchAllNips() {
+    try {
+      const data = await this.request('GET', '/master-pegawai/all.php?limit=1000');
+      // Adapt to possible response shapes
+      let items = [];
+      if (data && data.data && Array.isArray(data.data)) items = data.data;
+      else if (data && data.rows && Array.isArray(data.rows)) items = data.rows;
+      else if (Array.isArray(data)) items = data;
+      // Sumber NIP = API master pegawai (BUKAN CSV). Non-ASN punya NIP '-' di master
+      // → NIP TEKO-CAK = NIK, jadi fallback ke NIK. Filter nilai kosong/'-'.
+      return items
+        .map((item) => {
+          const nipVal = String(item.NIP || '').trim();
+          const nikVal = String(item.NIK || '').trim();
+          if (nipVal && nipVal !== '-') return nipVal;
+          if (nikVal && nikVal !== '-') return nikVal;
+          return null;
+        })
+        .filter(Boolean);
+    } catch (err) {
+      console.log(`⚠️ Gagal ambil NIP dari API master-pegawai: ${err.message}`);
+      return [];
+    }
+  }
 }
 
 /**
@@ -78,7 +204,7 @@ async function runTask(taskName, onProgress = () => {}, nip = null, tanggal = nu
     if (originalCwd) process.chdir(originalCwd);
   }
 
-  // Validasi credential
+  // Validasi credential TEKO-CAK
   if (!config.USERNAME || !config.PASSWORD) {
     return {
       success: false,
@@ -99,17 +225,6 @@ async function runTask(taskName, onProgress = () => {}, nip = null, tanggal = nu
     };
   }
 
-  log(`🚀 **TEKO-CAK: ${taskName.toUpperCase()}**`);
-  log(`🔗 ${config.TEKOCAK_URL}`);
-  log(`📅 Tahun: ${config.TAHUN}`);
-  if (nip) {
-    log(`🔢 NIP: ${nip}`);
-  } else {
-    log(`👥 NIP: ${config.DAFTAR_NIP.length} pegawai`);
-  }
-  if (config.HEADLESS) log('🕶️ Mode: Headless');
-  log('');
-
   // Hook console.log agar output task module juga ke-capture
   const originalLog = console.log;
   const hookedLog = (...args) => {
@@ -124,7 +239,6 @@ async function runTask(taskName, onProgress = () => {}, nip = null, tanggal = nu
   try {
     browser = await chromium.launch({
       headless: config.HEADLESS,
-      
       args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
     });
     let page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
@@ -174,7 +288,71 @@ async function runTask(taskName, onProgress = () => {}, nip = null, tanggal = nu
 
     // ===== UPDATE PEGAWAI =====
     if (taskName === 'all' || taskName === 'update') {
-      const nips = nip ? [nip] : config.DAFTAR_NIP;
+      const api = new MasterPegawaiApi();
+      let nips = nip ? [nip] : await api.fetchAllNips();
+
+      // Jika bukan update NIP spesifik: batasi ke pegawai yang ADA di PDF absensi hari ini.
+      // (User: "jika sudah ada pdf absensi hari ini, hanya update pegawai yg ada pada file pdf" —
+      //  sumber NIP-nya = data API absensi hari ini dengan FILTER SAMA seperti pdfGenerator:
+      //  exclude H & DR (dianggap Hadir), KECUALI pulang cepat = kategori sendiri.)
+      if (!nip) {
+        try {
+          const absensiApi = require('./apiClient'); // reuse existing client for absensi
+          const absensi = await absensiApi.getAbsensiHariIni();
+          const tanggalAbsensi = absensi.tanggal;
+          const { isPulangCepat } = require('./absensiRules');
+          const anomaliFiltered = (absensi.anomali || []).filter((a) => {
+            const k = (a.keterangan || '').toUpperCase();
+            if (isPulangCepat(a.jam_pulang, tanggalAbsensi)) return true; // pulang cepat = kategori sendiri
+            return k !== 'H' && k !== 'DR';                                 // bukan Hadir/DiLuarkan
+          });
+          // Fetch master data to map identifiers to NIP
+          const masterResp = await api.request('GET', '/master-pegawai/all.php?limit=1000');
+          const masterItems = masterResp.data && masterResp.data ? masterResp.data : (masterResp.rows || []);
+          const identifierToNip = new Map();
+          for (const item of masterItems) {
+            const nipVal = String(item.NIP || '').trim();
+            const nikVal = String(item.NIK || '').trim();
+            const idPegawai = String(item['ID-PEGAWAI'] || item.id_pegawai || '').trim();
+            if (nipVal && nipVal !== '-') {
+              // PNS/ASN: punya NIP asli — map NIP, NIK, & ID-PEGAWAI ke NIP
+              identifierToNip.set(nipVal, nipVal);
+              if (nikVal && nikVal !== '-') identifierToNip.set(nikVal, nipVal);
+              if (idPegawai) identifierToNip.set(idPegawai, nipVal);
+            } else if (nikVal && nikVal !== '-') {
+              // Non-ASN: NIP di master '-' → NIP TEKO-CAK = NIK (pola master-pegawai.csv.enc)
+              identifierToNip.set(nikVal, nikVal);
+              if (idPegawai) identifierToNip.set(idPegawai, nikVal);
+            }
+          }
+          const absenNips = [];
+          for (const a of anomaliFiltered) {
+            const nipVal = String(a.nip || '').trim();
+            const nikVal = String(a.nik || '').trim();
+            const idPegawai = String(a.id_pegawai || '').trim();
+            let id = null;
+            if (nipVal && nipVal !== '-') id = nipVal;
+            else if (nikVal && nikVal !== '-') id = nikVal;
+            else if (idPegawai && identifierToNip.has(idPegawai)) id = idPegawai;
+            if (id && identifierToNip.has(id)) {
+              const resolvedNip = identifierToNip.get(id);
+              if (resolvedNip && resolvedNip !== '-') {
+                absenNips.push(resolvedNip);
+              }
+            }
+          }
+          if (absenNips.length > 0) {
+            // deduplicate
+            const uniqueNips = [...new Set(absenNips)];
+            log(`📋 PDF absensi hari ini: ${anomaliFiltered.length} pegawai (anomali non-DR) → update ${uniqueNips.length} pegawai yang ada di PDF`);
+            nips = uniqueNips;
+          } else {
+            log('📋 Tidak ada anomali non-DR di absensi hari ini — update semua pegawai');
+          }
+        } catch (e) {
+          log(`⚠️ Gagal ambil data absensi (${e.message}) — fallback update semua pegawai dari API master-pegawai`);
+        }
+      }
       log(`👤 **Update ${nips.length} Pegawai...**`);
 
       let failedNips = await updatePegawai.run(page, browser, nips);
@@ -192,7 +370,6 @@ async function runTask(taskName, onProgress = () => {}, nip = null, tanggal = nu
           await browser.close();
           browser = await chromium.launch({
             headless: config.HEADLESS,
-            
             args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
           });
           page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
@@ -215,7 +392,6 @@ async function runTask(taskName, onProgress = () => {}, nip = null, tanggal = nu
     console.log = originalLog;
     await browser.close();
     return { success: true, output: lines.join('\n'), duration };
-
   } catch (err) {
     console.log = originalLog;
     try { if (browser) await browser.close(); } catch (_) {}

@@ -125,10 +125,12 @@ Saya adalah asisten AI yang siap membantu Anda! 🎉
     parse_mode: 'Markdown',
     reply_markup: {
       inline_keyboard: [
-        [{ text: '📅 Jadwal Rapat', callback_data: 'menu_jadwal' }, { text: '📋 Tugas & Disposisi', callback_data: 'menu_tugas' }],
-        [{ text: '🤖 TEKO-CAK', callback_data: 'menu_tekocak' }, { text: '📊 Absensi', callback_data: 'menu_absensi' }],
-        [{ text: '🛢️ BBM Non-Fosil', callback_data: 'menu_bbm' }, { text: 'ℹ️ Status', callback_data: 'menu_status' }],
-        [{ text: '❓ Bantuan', callback_data: 'menu_help' }],
+        [{ text: '📅 Jadwal Hari Ini', callback_data: 'cmd_jadwal_hariini' }, { text: '📅 Jadwal Besok', callback_data: 'cmd_jadwal_besok' }],
+        [{ text: '📅 Minggu Ini', callback_data: 'cmd_jadwal_mingguini' }, { text: '📅 Semua Jadwal', callback_data: 'cmd_jadwal_semua' }],
+        [{ text: '📋 Tugas Hari Ini', callback_data: 'cmd_tugas_hariini' }, { text: '📋 Tugas Besok', callback_data: 'cmd_tugas_besok' }],
+        [{ text: '📋 Semua Tugas', callback_data: 'cmd_tugas_semua' }, { text: '📊 Absensi', callback_data: 'cmd_absensi' }],
+        [{ text: '🛢️ BBM Non-Fosil', callback_data: 'cmd_bbm' }, { text: '🤖 TEKO-CAK', callback_data: 'menu_tekocak' }],
+        [{ text: 'ℹ️ Status', callback_data: 'menu_status' }, { text: '❓ Bantuan', callback_data: 'menu_help' }],
       ]
     }
   });
@@ -752,6 +754,23 @@ bot.on('message', async (msg) => {
     );
   }
 
+  // ── Pengaduan Listener: forward jawaban captcha ke file ──
+  // Jika ada pending_captcha.json, teks user dianggap kode captcha
+  // dan ditulis ke captcha_answer.txt untuk dibaca listener.
+  try {
+    const pendingPath = path.join(__dirname, '../../automated-pengaduan-listener/pending_captcha.json');
+    const answerPath = path.join(__dirname, '../../automated-pengaduan-listener/captcha_answer.txt');
+    if (fs.existsSync(pendingPath)) {
+      const pending = JSON.parse(fs.readFileSync(pendingPath, 'utf-8'));
+      const expired = Date.now() - (pending.createdAt || 0) > 10 * 60 * 1000;
+      if (!expired) {
+        fs.writeFileSync(answerPath, text.trim());
+        return bot.sendMessage(chatId, '✅ Kode captcha diterima, mencoba login ulang...');
+      }
+      fs.unlinkSync(pendingPath); // pending basi — hapus
+    }
+  } catch (_) { /* abaikan error file */ }
+
   try {
     // Kirim pesan "sedang memproses"
     const waitMsg = await bot.sendMessage(chatId, '⏳ Mohon tunggu, sedang mencari data...');
@@ -816,6 +835,32 @@ bot.on('callback_query', async (callbackQuery) => {
   const msgId = callbackQuery.message.message_id;
 
   // ─── Menu Navigasi ───
+
+  // Tombol perintah langsung (cmd_*) → panggil dispatcher handleMessage
+  const CMD_MAP = {
+    cmd_jadwal_hariini: 'jadwal-hariini',
+    cmd_jadwal_besok: 'jadwal-besok',
+    cmd_jadwal_mingguini: 'jadwal-mingguini',
+    cmd_jadwal_semua: 'jadwal-semua',
+    cmd_tugas_hariini: 'tugas-hariini',
+    cmd_tugas_besok: 'tugas-besok',
+    cmd_tugas_semua: 'tugas-semua',
+    cmd_absensi: 'absensi',
+    cmd_bbm: 'bbm',
+  };
+  if (CMD_MAP[data]) {
+    await bot.answerCallbackQuery(callbackQuery.id, { text: '⏳ Memproses...' });
+    try {
+      const replies = await handleMessage({ text: CMD_MAP[data], userId: chatId, authorized: true, channel: 'telegram' });
+      for (const reply of replies) {
+        await renderReply(chatId, reply);
+      }
+    } catch (err) {
+      console.error('❌ Error cmd:', err.message);
+      await bot.sendMessage(chatId, '😅 Maaf, terjadi kesalahan. Silakan coba lagi.');
+    }
+    return;
+  }
 
   if (data === 'menu_jadwal') {
     await bot.answerCallbackQuery(callbackQuery.id, { text: '📅' });
