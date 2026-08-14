@@ -1,6 +1,10 @@
 /**
  * Automasi Kantorku WFH — Headless mode untuk VPS
  *
+ * Sumber daftar pegawai WFH: API master pegawai BKPSDM
+ * (GET /master-pegawai/all.php?limit=1000 → filter KET='WFH'),
+ * fallback ke CSV terenkripsi lokal kalau API gagal.
+ *
  * Cara pakai:
  *   node index.js 2026-07-31          → isi WFH tanggal 31 Juli 2026
  *   HEADLESS=true node index.js ...   → mode headless (VPS)
@@ -9,6 +13,7 @@ require('dotenv').config({ path: require('path').resolve(__dirname, '..', '.env'
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
+const fetch = require('node-fetch');
 const { chromium } = require('playwright');
 
 // KANTORKU_* (root .env) dengan fallback nama lama untuk backward-compat
@@ -33,17 +38,122 @@ function decryptCsv(encryptedData) {
   return Buffer.concat([decipher.update(encryptedText), decipher.final()]).toString('utf-8');
 }
 
-function loadCsvData() {
-  // Coba .enc dulu, fallback ke .csv
+/**
+ * Fallback: baca daftar pegawai WFH dari CSV terenkripsi lokal.
+ * Dipakai HANYA kalau API master gagal (sibuk/504) — data bisa stale.
+ */
+function loadPegawaiWfhFromCsv() {
+  let csvRaw;
   if (fs.existsSync(CSV_ENC_PATH)) {
     const encrypted = fs.readFileSync(CSV_ENC_PATH, 'utf-8');
-    return decryptCsv(encrypted);
-  }
-  if (fs.existsSync(CSV_PATH)) {
+    csvRaw = decryptCsv(encrypted);
+  } else if (fs.existsSync(CSV_PATH)) {
     console.warn('⚠️  CSV tidak terenkripsi! Enkrip dulu untuk keamanan data.');
-    return fs.readFileSync(CSV_PATH, 'utf-8');
+    csvRaw = fs.readFileSync(CSV_PATH, 'utf-8');
+  } else {
+    throw new Error(`File CSV tidak ditemukan: ${CSV_PATH} atau ${CSV_ENC_PATH}`);
   }
-  throw new Error(`File CSV tidak ditemukan: ${CSV_PATH} atau ${CSV_ENC_PATH}`);
+
+  const lines = csvRaw.split('\n').filter(line => line.trim() !== '');
+  const header = lines[0].split(';');
+  const idxNip = header.indexOf('NIP/NIK');
+  const idxNama = header.indexOf('NAMA');
+  const idxKet = header.indexOf('KET');
+
+  if (idxNip === -1 || idxKet === -1) {
+    throw new Error('Kolom NIP/NIK atau KET tidak ditemukan di CSV');
+  }
+
+  const pegawai = [];
+  for (let i = 1; i < lines.length; i++) {
+    const cols = lines[i].split(';');
+    if (cols.length > idxKet && cols[idxKet]?.trim() === 'WFH') {
+      pegawai.push({
+        nip: cols[idxNip]?.trim(),
+        nama: idxNama >= 0 ? (cols[idxNama]?.trim() || '-') : (cols[3]?.trim() || '-')
+      });
+    }
+  }
+  return pegawai;
+}
+
+/**
+ * SUMBER UTAMA: ambil daftar pegawai WFH dari API master pegawai BKPSDM.
+ * GET /master-pegawai/all.php?limit=1000 → filter KET === 'WFH'.
+ * Mapping NIP: Non-ASN punya NIP '-' di master → fallback ke NIK
+ * (pola sama seperti update pegawai TEKO-CAK).
+ */
+async function fetchPegawaiWfhFromApi() {
+  const baseUrl = process.env.API_BASE_URL || 'https://bkpsdm.surabaya.go.id/api/ai-agent';
+  const username = process.env.API_USERNAME;
+  const password = process.env.API_PASSWORD;
+  if (!username || !password) throw new Error('API_USERNAME / API_PASSWORD tidak dikonfigurasi di .env');
+
+  const timeoutMs = 120000;
+
+  // Login
+  let res = await fetch(`${baseUrl}/auth/login.php`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (res.status >= 500) {
+    await new Promise(r => setTimeout(r, 3000));
+    res = await fetch(`${baseUrl}/auth/login.php`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  }
+  const loginData = await res.json();
+  if (!res.ok || !loginData.token) throw new Error(loginData.error || `Login API master gagal: HTTP ${res.status}`);
+
+  // Ambil semua pegawai
+  let mr = await fetch(`${baseUrl}/master-pegawai/all.php?limit=1000`, {
+    headers: { Authorization: `Bearer ${loginData.token}` },
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (mr.status >= 500) {
+    await new Promise(r => setTimeout(r, 3000));
+    mr = await fetch(`${baseUrl}/master-pegawai/all.php?limit=1000`, {
+      headers: { Authorization: `Bearer ${loginData.token}` },
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  }
+  const data = await mr.json();
+  if (!mr.ok) throw new Error(data.error || `HTTP ${mr.status}: ${mr.statusText}`);
+
+  let items = [];
+  if (data && data.data && Array.isArray(data.data)) items = data.data;
+  else if (data && data.rows && Array.isArray(data.rows)) items = data.rows;
+  else if (Array.isArray(data)) items = data;
+
+  return items
+    .filter(it => String(it.KET || '').trim() === 'WFH')
+    .map(it => {
+      let nip = String(it.NIP || '').trim();
+      if (!nip || nip === '-') nip = String(it.NIK || '').trim(); // Non-ASN: NIP '-' → NIK
+      return { nip, nama: String(it.NAMA || '').trim() || '-' };
+    });
+}
+
+/**
+ * Ambil daftar pegawai WFH: API master dulu, fallback CSV kalau API gagal.
+ */
+async function loadPegawaiWfh() {
+  try {
+    const pegawai = await fetchPegawaiWfhFromApi();
+    console.log(`   🌐 Sumber: API master pegawai (${pegawai.length} pegawai WFH)`);
+    return pegawai;
+  } catch (err) {
+    console.warn(`   ⚠️ API master gagal: ${err.message}`);
+    console.warn('   ⚠️ Fallback ke CSV terenkripsi (data mungkin stale)...');
+    const pegawai = loadPegawaiWfhFromCsv();
+    console.log(`   📂 Sumber: CSV fallback (${pegawai.length} pegawai WFH)`);
+    return pegawai;
+  }
 }
 
 if (!TANGGAL_WFH || !/^\d{4}-\d{2}-\d{2}$/.test(TANGGAL_WFH)) {
@@ -63,29 +173,9 @@ if (!TANGGAL_WFH || !/^\d{4}-\d{2}-\d{2}$/.test(TANGGAL_WFH)) {
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
 
   try {
-    // ========== BACA CSV ==========
-    console.log('\n📂 Membaca file CSV...');
-    const csvRaw = loadCsvData();
-    const lines = csvRaw.split('\n').filter(line => line.trim() !== '');
-    const header = lines[0].split(';');
-    const idxNip = header.indexOf('NIP/NIK');
-    const idxNama = header.indexOf('NAMA');
-    const idxKet = header.indexOf('KET');
-
-    if (idxNip === -1 || idxKet === -1) {
-      throw new Error('Kolom NIP/NIK atau KET tidak ditemukan di CSV');
-    }
-
-    const pegawaiWFH = [];
-    for (let i = 1; i < lines.length; i++) {
-      const cols = lines[i].split(';');
-      if (cols.length > idxKet && cols[idxKet]?.trim() === 'WFH') {
-        pegawaiWFH.push({
-          nip: cols[idxNip]?.trim(),
-          nama: idxNama >= 0 ? (cols[idxNama]?.trim() || '-') : (cols[3]?.trim() || '-')
-        });
-      }
-    }
+    // ========== AMBIL DAFTAR PEGAWAI WFH (API MASTER) ==========
+    console.log('\n🌐 Mengambil daftar pegawai WFH dari API master...');
+    const pegawaiWFH = await loadPegawaiWfh();
 
     console.log(`   📋 ${pegawaiWFH.length} pegawai dengan status WFH`);
     if (pegawaiWFH.length === 0) {
