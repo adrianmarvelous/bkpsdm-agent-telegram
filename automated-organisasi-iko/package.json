@@ -1,0 +1,16 @@
+{
+  "name": "automated-organisasi-iko",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Automasi login Organisasi IKO Monev 2026",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "login": "node index.js",
+    "monitor": "node monitor.js"
+  },
+  "dependencies": {
+    "dotenv": "^17.4.2",
+    "playwright": "^1.61.1"
+  }
+}

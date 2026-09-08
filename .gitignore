@@ -18,6 +18,10 @@ automated-pengaduan-listener/state.json
 automated-pengaduan-listener/pending_captcha.json
 automated-pengaduan-listener/captcha_answer.txt
 
+# Organisasi IKO Monitor — session & state jangan di-commit
+automated-organisasi-iko/session.json
+automated-organisasi-iko/state.json
+
 # File test / percobaan sekali pakai
 test_*.js
 src/services/tekocak_new.js
