@@ -38,16 +38,17 @@ if (ALLOWED_NUMBERS.length > 0) {
 }
 
 // =============== FORWARDER GRUP → NOMOR TERTENTU ===============
-// Semua chat baru di MONITOR_GROUP diteruskan ke FORWARD_NUMBER.
+// Pesan mengandung FORWARD_KEYWORD di grup mana pun (SEMUA @g.us yang bot ikuti,
+// termasuk grup yang akan datang) diteruskan ke FORWARD_NUMBER.
 // Konfigurasi hardcode (default), bisa dioverride via env tanpa edit kode.
-// Kosongkan MONITOR_GROUP ('') untuk menonaktifkan fitur ini.
-const MONITOR_GROUP = process.env.WA_MONITOR_GROUP || '120363408502062636@g.us'; // Ai agent group
+// Set WA_MONITOR_GROUP ke SATU grup tertentu untuk membatasi; KOSONGKAN = semua grup.
+const MONITOR_GROUP = (process.env.WA_MONITOR_GROUP || '').trim(); // kosong = SEMUA grup
 const FORWARD_NUMBER = (process.env.WA_FORWARD_NUMBER || '6281216435394').replace(/[^0-9]/g, '');
 // Hanya teruskan pesan yang mengandung kata ini (case-insensitive). Kosongkan ('') = forward semua pesan.
 const FORWARD_KEYWORD = (process.env.WA_FORWARD_KEYWORD || 'hadir').toLowerCase();
-if (MONITOR_GROUP && FORWARD_NUMBER) {
+if (FORWARD_NUMBER) {
   console.log(
-    `🔁 Forwarder grup aktif: chat di ${MONITOR_GROUP} → ${FORWARD_NUMBER}` +
+    `🔁 Forwarder grup aktif: ${MONITOR_GROUP ? `khusus ${MONITOR_GROUP}` : 'SEMUA grup (@g.us)'} → ${FORWARD_NUMBER}` +
       (FORWARD_KEYWORD ? ` (hanya yang mengandung "${FORWARD_KEYWORD}")` : ' (semua pesan)')
   );
 }
@@ -194,19 +195,18 @@ function extractMessageContent(m) {
   return '🔔 [Pesan]';
 }
 
-/** Nama grup terpantau — cache 60 dtk agar tidak groupMetadata setiap pesan */
-let monitorGroupNameCache = '';
-let monitorGroupNameAt = 0;
-async function monitorGroupName(sock) {
-  if (monitorGroupNameCache && Date.now() - monitorGroupNameAt < 60000) return monitorGroupNameCache;
+/** Nama grup — cache per grup (TTL 60 dtk) agar tidak groupMetadata setiap pesan */
+const groupNameCache = new Map(); // gid → { name, at }
+async function monitorGroupName(sock, gid) {
+  const hit = groupNameCache.get(gid);
+  if (hit && Date.now() - hit.at < 60000) return hit.name;
+  let name = gid;
   try {
-    const meta = await sock.groupMetadata(MONITOR_GROUP);
-    monitorGroupNameCache = meta.subject || MONITOR_GROUP;
-  } catch (_) {
-    monitorGroupNameCache = MONITOR_GROUP;
-  }
-  monitorGroupNameAt = Date.now();
-  return monitorGroupNameCache;
+    const meta = await sock.groupMetadata(gid);
+    name = meta.subject || gid;
+  } catch (_) { /* fallback: pakai jid */ }
+  groupNameCache.set(gid, { name, at: Date.now() });
+  return name;
 }
 
 /** Format 628xx → 08xx untuk tampilan */
@@ -235,7 +235,7 @@ function forwardHeader(gname, senderLabel, now) {
 
 /** Kirim 1 pesan forward ke nomor tujuan (dengan header info pengirim & waktu WIB) */
 async function sendForward(sock, m, senderJid) {
-  if (!MONITOR_GROUP || !FORWARD_NUMBER) return;
+  if (!FORWARD_NUMBER) return;
 
   // Jangan echo-balik pesan dari nomor tujuan itu sendiri (dia sudah melihat isi grup)
   let senderPn = null;
@@ -244,7 +244,7 @@ async function sendForward(sock, m, senderJid) {
   } catch (_) { /* LID tak ter-resolve → tetap lanjut */ }
   if (senderPn && senderPn === FORWARD_NUMBER) return;
 
-  const gname = await monitorGroupName(sock);
+  const gname = await monitorGroupName(sock, m.key.remoteJid);
   const senderLabel =
     (m.pushName ? m.pushName + ' ' : '') + '(' + prettyPn(senderPn || numberFromPnJid(senderJid)) + ')';
   const header = forwardHeader(gname, senderLabel, new Date());
@@ -318,7 +318,17 @@ function forwardGroupMessage(sock, m, senderJid) {
   // (media tanpa caption/label juga otomatis lewat karena label tidak mengandung kata kunci).
   const content = extractMessageContent(m);
   if (FORWARD_KEYWORD && !content.toLowerCase().includes(FORWARD_KEYWORD)) {
-    console.log(`⏭️  ${MONITOR_GROUP}: dilewati (tidak mengandung "${FORWARD_KEYWORD}") — ${content.slice(0, 60)}`);
+    // Log skip hanya untuk pesan berteks asli — media/stiker tanpa teks tidak usah berisik
+    const rawText =
+      m.message?.conversation ||
+      m.message?.extendedTextMessage?.text ||
+      m.message?.imageMessage?.caption ||
+      m.message?.videoMessage?.caption ||
+      m.message?.documentMessage?.caption ||
+      '';
+    if (rawText.trim()) {
+      console.log(`⏭️  ${m.key.remoteJid}: dilewati (tidak mengandung "${FORWARD_KEYWORD}") — ${content.slice(0, 60)}`);
+    }
     return Promise.resolve();
   }
   forwardChain = forwardChain
@@ -470,11 +480,11 @@ async function startBot() {
     const replyJid = m.key.remoteJid;
     const senderJid = isGroup ? (m.key.participant || m.key.remoteJid) : m.key.remoteJid;
 
-    // ============ FORWARDER: semua chat di grup terpantau → nomor tujuan ============
-    // Dijalankan untuk pesan apa pun (teks, media, dll), kecuali pesan sistem
-    // (protocolMessage), distribusi kunci, dan reaksi emoji. Pesan dari bot sendiri
-    // sudah tersaring di atas (fromMe).
-    if (isGroup && MONITOR_GROUP && m.key.remoteJid === MONITOR_GROUP) {
+    // ============ FORWARDER: pesan ber-kata kunci di grup → nomor tujuan ============
+    // Berlaku di SEMUA grup @g.us (atau hanya MONITOR_GROUP kalau di-set). Dijalankan
+    // untuk pesan apa pun (teks, media, dll), kecuali pesan sistem (protocolMessage),
+    // distribusi kunci, dan reaksi emoji. Pesan dari bot sendiri sudah tersaring di atas.
+    if (isGroup && (!MONITOR_GROUP || m.key.remoteJid === MONITOR_GROUP)) {
       const sys = m.message?.protocolMessage || m.message?.senderKeyDistributionMessage || m.message?.reactionMessage;
       if (!sys) {
         forwardGroupMessage(sock, m, senderJid).catch((e) =>
