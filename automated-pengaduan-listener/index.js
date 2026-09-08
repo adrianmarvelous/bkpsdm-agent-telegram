@@ -84,6 +84,44 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+// ===================== WA BRIDGE (kirim via bot bkpsdm-wa, localhost) =====================
+// Listener TIDAK boleh buka koneksi WA sendiri (2 koneksi session sama = di-kick).
+// Alert WA dikirim lewat bridge HTTP di dalam proses bot (src/whatsapp/bot.js).
+const WA_BRIDGE_URL = process.env.WA_BRIDGE_URL || 'http://127.0.0.1:8787/wa/send';
+const WA_BRIDGE_TOKEN = process.env.WA_BRIDGE_TOKEN || '572182ec20aa6d9202f0f0bb';
+// Nomor WA penerima alert (bisa lebih dari satu, pisah koma) — default: 2 nomor allowed bot
+const WA_ALERT_NUMBERS = (process.env.WA_ALERT_NUMBERS || '6282244649994,6281216435394')
+  .split(',')
+  .map((s) => s.trim().replace(/[^0-9]/g, ''))
+  .filter((s) => s.length > 0);
+
+/** <b>…</b> → *…*, tag HTML lain dihapus (WA tidak render HTML) */
+function toWaText(s) {
+  return String(s || '')
+    .replace(/<b>(.*?)<\/b>/g, '*$1*')
+    .replace(/<[^>]+>/g, '')
+    .trim();
+}
+
+/** Kirim teks alert ke semua nomor WA tujuan via bridge bot (fire-and-forget, error tidak fatal) */
+async function waSendAlert(text) {
+  if (WA_ALERT_NUMBERS.length === 0) return;
+  for (const num of WA_ALERT_NUMBERS) {
+    try {
+      const res = await fetch(WA_BRIDGE_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: WA_BRIDGE_TOKEN, text: toWaText(text), to: num }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!data.ok) log('⚠️  waSendAlert gagal ke', num + ':', res.status, JSON.stringify(data).slice(0, 150));
+      else log('✅ Alert WA terkirim ke', num);
+    } catch (e) {
+      log('⚠️  waSendAlert error ke', num + ':', e.message, '(bot bkpsdm-wa hidup? bridge ada di proses itu)');
+    }
+  }
+}
+
 // ===================== TELEGRAM =====================
 
 async function tgSendText(text) {
@@ -482,6 +520,7 @@ function processRows(rows) {
     // TIDAK menunggu laporan terjadwal 2 jam. Laporan 2 jam tetap jalan sesuai jadwalnya.
     log(`🚨 ${newRows.length} row baru ditemukan — kirim alert instan`);
     tgSendText(formatNewRows(newRows));
+    waSendAlert(formatNewRows(newRows)); // 🔔 + kirim ke WA nomor tujuan (via bridge bot bkpsdm-wa)
   } else {
     log(`✅ Tidak ada row baru (total ${rows.length} row)`);
   }

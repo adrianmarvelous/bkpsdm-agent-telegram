@@ -5,6 +5,9 @@ node_modules/
 # WhatsApp session & QR (jangan pernah di-commit!)
 src/whatsapp/auth_info/
 src/whatsapp/qr-code.png
+qr-code.png
+qr-ascii.txt
+src/whatsapp/lid-pn-cache.json
 
 # File data sensitif — jangan pernah di-commit!
 # (CSV plaintext data pegawai: NIP/NIK/No WA)
