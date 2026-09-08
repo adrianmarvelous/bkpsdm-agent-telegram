@@ -288,23 +288,38 @@ async function runTask(taskName, onProgress = () => {}, nip = null, tanggal = nu
 
     // ===== UPDATE PEGAWAI =====
     if (taskName === 'all' || taskName === 'update') {
+      // Validasi tanggal — hanya relevan untuk "update tanggal spesifik"
+      if (tanggal && !/^\d{4}-\d{1,2}-\d{1,2}$/.test(String(tanggal).trim())) {
+        console.log = originalLog;
+        await browser.close();
+        return {
+          success: false,
+          output: '❌ **Tanggal tidak valid.** Gunakan: `/tekocak update tanggal 2 september` (format lain: `2026-09-02`, `02/09/2026`)',
+          duration: (Date.now() - startTime) / 1000,
+        };
+      }
       const api = new MasterPegawaiApi();
       let nips = nip ? [nip] : await api.fetchAllNips();
 
-      // Jika bukan update NIP spesifik: batasi ke pegawai yang ADA di PDF absensi hari ini.
+      // Jika bukan update NIP spesifik: batasi ke pegawai yang ADA di PDF absensi.
       // (User: "jika sudah ada pdf absensi hari ini, hanya update pegawai yg ada pada file pdf" —
-      //  sumber NIP-nya = data API absensi hari ini dengan FILTER SAMA seperti pdfGenerator:
+      //  sumber NIP-nya = data API absensi dengan FILTER SAMA seperti pdfGenerator:
       //  exclude H & DR (dianggap Hadir), KECUALI pulang cepat = kategori sendiri.)
+      // update tanggal spesifik (3 Sep 2026): /tekocak update <tanggal> → ambil absensi
+      // TANGGAL ITU; tanpa tanggal → absensi hari ini.
       if (!nip) {
         try {
           const absensiApi = require('./apiClient'); // reuse existing client for absensi
-          const absensi = await absensiApi.getAbsensiHariIni();
+          const absensi = tanggal
+            ? await absensiApi.getAbsensiByTanggal(tanggal)
+            : await absensiApi.getAbsensiHariIni();
           const tanggalAbsensi = absensi.tanggal;
-          const { isPulangCepat } = require('./absensiRules');
+          const { isPulangCepat, isKeteranganNormal } = require('./absensiRules');
           const anomaliFiltered = (absensi.anomali || []).filter((a) => {
             const k = (a.keterangan || '').toUpperCase();
+            if (k === 'DL' || k === 'I') return false; // DL/I: TIDAK PERNAH di-update (user 12 Agu 2026)
             if (isPulangCepat(a.jam_pulang, tanggalAbsensi)) return true; // pulang cepat = kategori sendiri
-            return k !== 'H' && k !== 'DR';                                 // bukan Hadir/DiLuarkan
+            return !isKeteranganNormal(k); // bukan H/DR (dianggap normal)
           });
           // Fetch master data to map identifiers to NIP
           const masterResp = await api.request('GET', '/master-pegawai/all.php?limit=1000');
@@ -344,12 +359,26 @@ async function runTask(taskName, onProgress = () => {}, nip = null, tanggal = nu
           if (absenNips.length > 0) {
             // deduplicate
             const uniqueNips = [...new Set(absenNips)];
-            log(`📋 PDF absensi hari ini: ${anomaliFiltered.length} pegawai (anomali non-DR) → update ${uniqueNips.length} pegawai yang ada di PDF`);
+            const tglLabel = tanggal || absensi.tanggal || 'hari ini';
+            log(`📋 PDF absensi ${tglLabel}: ${anomaliFiltered.length} pegawai (anomali non-DR) → update ${uniqueNips.length} pegawai yang ada di PDF`);
             nips = uniqueNips;
           } else {
-            log('📋 Tidak ada anomali non-DR di absensi hari ini — update semua pegawai');
+            const tglLabel = tanggal || absensi.tanggal || 'hari ini';
+            log(`📋 Tidak ada anomali non-DR di absensi ${tglLabel} — update semua pegawai`);
           }
         } catch (e) {
+          if (tanggal) {
+            // Update tanggal spesifik (3 Sep 2026): tanpa data absensi tanggal itu kita
+            // TIDAK tahu NIP anomali-nya → jangan fallback update semua pegawai
+            // (bisa salah sasaran & buang waktu 4+ menit). Batalkan dengan jelas.
+            console.log = originalLog;
+            await browser.close();
+            return {
+              success: false,
+              output: `❌ **Update tanggal ${tanggal} dibatalkan** — gagal ambil absensi tanggal itu (${e.message}).\nJalankan ulang beberapa saat lagi.`,
+              duration: (Date.now() - startTime) / 1000,
+            };
+          }
           log(`⚠️ Gagal ambil data absensi (${e.message}) — fallback update semua pegawai dari API master-pegawai`);
         }
       }

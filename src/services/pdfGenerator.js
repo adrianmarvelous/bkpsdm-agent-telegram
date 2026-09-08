@@ -7,7 +7,7 @@
 const PDFDocument = require('pdfkit');
 const fs = require('fs');
 const path = require('path');
-const { isPulangCepat, countPulangCepat } = require('./absensiRules');
+const { isPulangCepat, countPulangCepat, isKeteranganNormal, countKeteranganNormal } = require('./absensiRules');
 
 // Kolom tabel: [posX, width]
 const COLUMNS = [
@@ -121,14 +121,14 @@ function generateAbsensiPdf(data) {
   doc.moveTo(TABLE_LEFT, doc.y).lineTo(TABLE_RIGHT, doc.y).stroke('#cccccc');
   doc.moveDown(0.3);
 
-  // ─── Ringkasan (format baru) — DR dianggap Hadir ───
+  // ─── Ringkasan (format baru) — DR/DL/I dianggap Hadir ───
   if (data.ringkasan) {
     const r = data.ringkasan;
     const anomali = data.anomali || [];
-    const drCount = anomali.filter(a => (a.keterangan || '').toUpperCase() === 'DR').length;
+    const normalKeterangan = countKeteranganNormal(anomali); // H/DR/DL/I
     const total = r.total_pegawai || r.total || 0;
-    const normal = (r.normal || r.hadir || 0) + drCount;
-    const anomaliCount = (r.anomali || r.absen || 0) - drCount;
+    const normal = (r.normal || r.hadir || 0) + normalKeterangan;
+    const anomaliCount = (r.anomali || r.absen || 0) - normalKeterangan;
     const pulangCepat = countPulangCepat(anomali, data.tanggal);
     doc.fontSize(10).font('Helvetica');
     doc.text(`Total: ${total} pegawai  |  ✅ Normal: ${normal}  |  ⚠️ Anomali: ${anomaliCount}${pulangCepat > 0 ? `  |  🏃 Pulang cepat: ${pulangCepat}` : ''}`);
@@ -137,11 +137,12 @@ function generateAbsensiPdf(data) {
     doc.moveDown(0.5);
   }
 
-  // ─── Tabel Anomali (format baru) — filter DR (dianggap Hadir), KECUALI pulang cepat (kategori terpisah) ───
+  // ─── Tabel Anomali (format baru) — filter DR/DL/I (dianggap Hadir), KECUALI pulang cepat (kategori terpisah) ───
   const anomaliFiltered = (data.anomali || []).filter(a => {
     const k = (a.keterangan || '').toUpperCase();
+    if (k === 'DL' || k === 'I') return false; // DL/I: TIDAK PERNAH masuk PDF (user 12 Agu 2026)
     if (isPulangCepat(a.jam_pulang, data.tanggal)) return true; // pulang cepat = kategori sendiri
-    return k !== 'H' && k !== 'DR';
+    return !isKeteranganNormal(k); // H/DR dianggap normal — tidak masuk PDF
   });
   if (anomaliFiltered.length > 0) {
     doc.fontSize(11).font('Helvetica-Bold');

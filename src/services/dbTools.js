@@ -163,6 +163,39 @@ const DB_TOOLS = [
       return await api.getSemuaTugas();
     },
   },
+  // =============== TOOLS TUPOKSI ===============
+  {
+    name: 'get_tupoksi_hari_ini',
+    description: 'Mendapatkan data tugas pokok dan fungsi (tupoksi) untuk hari ini',
+    parameters: {
+      type: 'object',
+      properties: {},
+    },
+    handler: async () => {
+      return await api.getTupoksiHariIni();
+    },
+  },
+  {
+    name: 'get_tupoksi_by_tanggal',
+    description: 'Mendapatkan data tugas pokok dan fungsi (tupoksi) berdasarkan tanggal tertentu. Bisa terima format: YYYY-MM-DD, DD-MM-YYYY, atau teks Indonesia seperti "26 juni" atau "26 juni 2026"',
+    parameters: {
+      type: 'object',
+      properties: {
+        tanggal: {
+          type: 'string',
+          description: 'Tanggal dalam berbagai format. Contoh: "2026-06-30", "30-06-2026", "30 juni", "30 juni 2026"',
+        },
+      },
+      required: ['tanggal'],
+    },
+    handler: async (args) => {
+      const parsed = parseIndonesianDate(args.tanggal);
+      if (!parsed) {
+        return { error: true, message: `Tidak bisa memahami format tanggal "${args.tanggal}".` };
+      }
+      return await api.getTupoksiByTanggal(parsed);
+    },
+  },
   // =============== TOOLS BBM NON-FOSIL ===============
   {
     name: 'get_bbm_non_fosil_hari_ini',

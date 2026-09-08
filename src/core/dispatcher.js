@@ -19,7 +19,7 @@ const { executeTool, parseIndonesianDate } = require('../services/dbTools');
 const { getHistory, addMessage, clearHistory } = require('../services/conversation');
 const { askAI } = require('../services/ai');
 const { generateAbsensiPdf } = require('../services/pdfGenerator');
-const { isPulangCepat, countPulangCepat } = require('../services/absensiRules');
+const { isPulangCepat, countPulangCepat, isKeteranganNormal, countKeteranganNormal } = require('../services/absensiRules');
 
 // =============== DETEKSI QUERY (diport verbatim dari bot.js) ===============
 
@@ -39,11 +39,31 @@ function parseTanggal(text) {
   return null;
 }
 
+/** Nama bulan Indonesia (display) */
+const BULAN_NAMA = ['Januari','Februari','Maret','April','Mei','Juni','Juli','Agustus','September','Oktober','November','Desember'];
+
+/**
+ * Format tanggal YYYY-MM-DD → "07 September 2026" (Indonesia).
+ * Input non-ISO dibiarkan apa adanya.
+ */
+function formatTanggalIndonesia(tgl) {
+  if (!tgl) return '-';
+  const m = String(tgl).match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (!m) return String(tgl);
+  const [, y, mo, d] = m;
+  return `${d} ${BULAN_NAMA[Number(mo) - 1] || mo} ${y}`;
+}
+
 function detectJadwalQuery(text) {
   const lower = text.toLowerCase();
 
   if (/(jadwal|rapat|agenda).*(hari\s*ini|sekarang)/i.test(lower)) {
     return { tool: 'get_jadwal_rapat_hari_ini', args: {} };
+  }
+  if (/(jadwal|rapat|agenda).*besok/i.test(lower)) {
+    const besok = new Date(Date.now() + 86400000);
+    const tgl = `${besok.getFullYear()}-${String(besok.getMonth() + 1).padStart(2, '0')}-${String(besok.getDate()).padStart(2, '0')}`;
+    return { tool: 'get_jadwal_rapat_by_tanggal', args: { tanggal: tgl } };
   }
   if (/(jadwal|rapat|agenda).*(minggu\s*ini)/i.test(lower)) {
     return { tool: 'get_jadwal_rapat_minggu_ini', args: {} };
@@ -69,6 +89,11 @@ function detectTugasQuery(text) {
   if (/(tugas|disposisi).*(hari\s*ini|sekarang)/i.test(lower)) {
     return { tool: 'get_tugas_hari_ini', args: {} };
   }
+  if (/(tugas|disposisi).*besok/i.test(lower)) {
+    const besok = new Date(Date.now() + 86400000);
+    const tgl = `${besok.getFullYear()}-${String(besok.getMonth() + 1).padStart(2, '0')}-${String(besok.getDate()).padStart(2, '0')}`;
+    return { tool: 'get_tugas_by_tanggal', args: { tanggal: tgl } };
+  }
   if (/(tampilkan|munculkan|lihat).*(semua)\s*(tugas|disposisi)/i.test(lower) ||
       /semua\s*(tugas|disposisi)/i.test(lower)) {
     return { tool: 'get_semua_tugas', args: {} };
@@ -80,6 +105,27 @@ function detectTugasQuery(text) {
   const angkaMatch = text.match(/(\d{4}[-/]\d{1,2}[-/]\d{1,2})|(\d{1,2}[-/]\d{1,2}[-/]\d{4})/);
   if (angkaMatch && /(tugas|disposisi|tampilkan|munculkan|tanggal)/i.test(lower)) {
     return { tool: 'get_tugas_by_tanggal', args: { tanggal: angkaMatch[0] } };
+  }
+  return null;
+}
+
+/** Deteksi query TUPOKSI — harus dipanggil SEBELUM detectTugasQuery,
+ *  karena frasa "tugas tupoksi..." juga match regex tugas biasa. */
+function detectTupoksiQuery(text) {
+  const lower = text.toLowerCase();
+  if (!/(tupoksi|tugas\s*pokok)/i.test(lower)) return null;
+
+  if (/(hari\s*ini|sekarang|today)/i.test(lower)) {
+    return { tool: 'get_tupoksi_hari_ini', args: {} };
+  }
+  if (/besok/i.test(lower)) {
+    const besok = new Date(Date.now() + 86400000);
+    const tgl = `${besok.getFullYear()}-${String(besok.getMonth() + 1).padStart(2, '0')}-${String(besok.getDate()).padStart(2, '0')}`;
+    return { tool: 'get_tupoksi_by_tanggal', args: { tanggal: tgl } };
+  }
+  const tanggal = parseTanggal(text);
+  if (tanggal) {
+    return { tool: 'get_tupoksi_by_tanggal', args: { tanggal } };
   }
   return null;
 }
@@ -194,6 +240,26 @@ function formatTugas(rows, title, channel = 'telegram') {
   return { text: msg, keyboard };
 }
 
+/** Format data tupoksi: { staff_nama, jabatan, unit_kerja, tupoksi, deskripsi, deadline, selesai } */
+function formatTupoksi(rows, title, channel = 'telegram') {
+  if (!rows || rows.length === 0) return { text: null, keyboard: [] };
+  if (rows.message) return { text: `📭 ${rows.message}`, keyboard: [] };
+  if (rows.error) return { text: `⚠️ ${rows.message}`, keyboard: [] };
+
+  let msg = `📋 <b>${title}</b>\n\n`;
+  rows.forEach((r, i) => {
+    msg += `${i + 1}. <b>${r.staff_nama || '-'}</b>\n`;
+    if (r.jabatan) msg += `   💼 ${r.jabatan}\n`;
+    if (r.unit_kerja) msg += `   🏢 ${r.unit_kerja}\n`;
+    msg += `   📌 ${r.tupoksi || '-'}`;
+    if (r.deskripsi) msg += ` — ${r.deskripsi}`;
+    msg += '\n';
+    if (r.deadline) msg += `   ⏰ Deadline: ${formatTanggalIndonesia(r.deadline)}\n`;
+    msg += `   ${r.selesai ? '✅ Selesai' : '⏳ Belum selesai'}\n\n`;
+  });
+  return { text: msg, keyboard: [] };
+}
+
 function formatBbm(response, title) {
   if (!response) return { text: null };
 
@@ -227,13 +293,13 @@ function formatAbsensi(response, title = 'Absensi TEKO-CAK Hari Ini') {
   let msg = `📋 <b>${title}</b>\n`;
   if (response.tanggal) msg += `📅 ${response.tanggal}\n`;
 
-  // Ringkasan — DR dianggap Hadir
+  // Ringkasan — DR/DL/I dianggap Hadir
   if (response.ringkasan) {
     const r = response.ringkasan;
     const anomaliRaw = response.anomali || [];
-    const drCount = anomaliRaw.filter(a => (a.keterangan || '').toUpperCase() === 'DR').length;
-    const normal = (r.normal || 0) + drCount;
-    const anomali = (r.anomali || 0) - drCount;
+    const normalKeterangan = countKeteranganNormal(anomaliRaw); // H/DR/DL/I
+    const normal = (r.normal || 0) + normalKeterangan;
+    const anomali = (r.anomali || 0) - normalKeterangan;
     msg += `👥 Total: ${r.total_pegawai || 0} pegawai\n`;
     msg += `✅ Normal: ${normal} pegawai\n`;
     msg += `⚠️ Anomali: ${anomali} pegawai\n`;
@@ -251,11 +317,12 @@ function formatAbsensi(response, title = 'Absensi TEKO-CAK Hari Ini') {
     msg += `\n`;
   }
 
-  // Daftar anomali — filter DR (dianggap Hadir), KECUALI pulang cepat
+  // Daftar anomali — filter DR/DL/I (dianggap Hadir), KECUALI pulang cepat
   const anomaliFiltered = (response.anomali || []).filter(a => {
     const k = (a.keterangan || '').toUpperCase();
+    if (k === 'DL' || k === 'I') return false; // DL/I: TIDAK PERNAH masuk daftar anomali (user 12 Agu 2026)
     if (isPulangCepat(a.jam_pulang, response.tanggal)) return true; // pulang cepat = kategori sendiri
-    return k !== 'H' && k !== 'DR';
+    return !isKeteranganNormal(k); // H/DR dianggap normal — tidak masuk daftar anomali
   });
   if (anomaliFiltered.length > 0) {
     msg += `<u>⚠️ ANOMALI (${anomaliFiltered.length})</u>\n\n`;
@@ -303,9 +370,9 @@ async function buildAbsensiReply(data, label = 'Absensi TEKO-CAK Hari Ini') {
   if (totalPegawai > 15) {
     const pdfPath = await generateAbsensiPdf(data);
     const anomaliArr = data?.anomali || [];
-    const drCount = anomaliArr.filter(a => (a.keterangan || '').toUpperCase() === 'DR').length;
-    const hadir = (r?.normal || r?.hadir || 0) + drCount;
-    const anomali = (r?.anomali || r?.absen || 0) - drCount;
+    const normalKeterangan = countKeteranganNormal(anomaliArr); // H/DR/DL/I
+    const hadir = (r?.normal || r?.hadir || 0) + normalKeterangan;
+    const anomali = (r?.anomali || r?.absen || 0) - normalKeterangan;
     const caption = `📋 <b>${label}</b>\n📅 ${data.tanggal || '-'}\n👥 ${totalPegawai} pegawai | ✅ Normal ${hadir}${anomali > 0 ? ' | ⚠️ Anomali ' + anomali : ''}`;
     const pulangCepat = countPulangCepat(data?.anomali || [], data?.tanggal);
     const captionFull = pulangCepat > 0 ? `${caption} | 🏃 Pulang cepat ${pulangCepat}` : caption;
@@ -336,6 +403,8 @@ function buildHelpText(channel = 'telegram') {
     '• "Tampilkan jadwal rapat 26 juni"',
     '• "Munculkan tugas 25 juni"',
     '• "Tugas hari ini"',
+    '• "Tugas tupoksi hari ini"',
+    '• "Tugas tupoksi 8 september"',
     '• "Absensi 4 agustus"',
     '',
     '📌 *Perintah khusus:*',
@@ -343,11 +412,19 @@ function buildHelpText(channel = 'telegram') {
     `${cmd('/help')} — Bantuan ini`,
     `${cmd('/reset')} — Hapus riwayat chat`,
     `${cmd('/status')} — Cek status bot`,
-    `${cmd('/absensi')} — Cek absensi TEKO-CAK hari ini`,
+    `${cmd('/absensi')} — Absensi TEKO-CAK hari ini`,
     `${cmd('/absensi 4 agustus')} — Absensi tanggal spesifik`,
     `${cmd('/jadwal-hariini')} — Jadwal hari ini`,
+    `${cmd('/jadwal-besok')} — Jadwal besok`,
+    `${cmd('/jadwal-mingguini')} — Jadwal minggu ini`,
+    `${cmd('/jadwal-semua')} — Semua jadwal rapat`,
+    `${cmd('/jadwal 26 juni')} — Jadwal tanggal spesifik`,
     `${cmd('/tugas-hariini')} — Tugas hari ini`,
-    `${cmd('/bbm')} — BBM Non-Fosil`,
+    `${cmd('/tugas-besok')} — Tugas besok`,
+    `${cmd('/tugas-semua')} — Semua tugas`,
+    `${cmd('/tugas 25 juni')} — Tugas tanggal spesifik`,
+    `${cmd('/bbm')} — BBM Non-Fosil hari ini`,
+    `${cmd('/bbm 26 juni')} — BBM Non-Fosil tanggal spesifik`,
     '',
     '💡 *Tips:* Semakin detail pertanyaanmu, semakin baik jawabannya!',
   ].join('\n');
@@ -367,6 +444,9 @@ function handleExactCommand(firstWord, rest, channel) {
     'tugas_hari_ini': { tool: 'get_tugas_hari_ini', args: {}, title: 'Tugas Hari Ini 📋' },
     'tugas-semua': { tool: 'get_semua_tugas', args: {}, title: 'Semua Tugas 📋' },
     'tugas_semua': { tool: 'get_semua_tugas', args: {}, title: 'Semua Tugas 📋' },
+    'tupoksi-hariini': { tool: 'get_tupoksi_hari_ini', args: {}, title: 'Tugas Tupoksi Hari Ini 📋' },
+    'tupoksi_hari_ini': { tool: 'get_tupoksi_hari_ini', args: {}, title: 'Tugas Tupoksi Hari Ini 📋' },
+    'tupoksi-hari-ini': { tool: 'get_tupoksi_hari_ini', args: {}, title: 'Tugas Tupoksi Hari Ini 📋' },
   };
   return map[firstWord] || null;
 }
@@ -441,6 +521,23 @@ async function handleMessage({ text, userId, authorized = true, channel = 'teleg
       const formatted = formatJadwal(result, `Jadwal Rapat Besok (${tgl}) 📆`, channel);
       return renderQueryResult(formatted, '📭 Tidak ada jadwal rapat.', channel);
     }
+
+    // ── TUPOKSI — harus SEBELUM branch 'tugas' biasa, karena frasa
+    //    "tugas tupoksi ..." juga match /^tugas/ dan regex tugas biasa.
+    const tupoksiNatQuery = detectTupoksiQuery(input);
+    if (tupoksiNatQuery) {
+      const result = await executeTool(tupoksiNatQuery.tool, tupoksiNatQuery.args);
+      const tglTupoksi = tupoksiNatQuery.args.tanggal
+        ? formatTanggalIndonesia(tupoksiNatQuery.args.tanggal)
+        : '';
+      const titles = {
+        get_tupoksi_hari_ini: 'Tugas Tupoksi Hari Ini 📋',
+        get_tupoksi_by_tanggal: `Tugas Tupoksi ${tglTupoksi} 📋`,
+      };
+      const formatted = formatTupoksi(result, titles[tupoksiNatQuery.tool] || 'Tugas Tupoksi', channel);
+      return renderQueryResult(formatted, '📭 Tidak ada data tupoksi.', channel);
+    }
+
     if (firstWord === 'tugas' && parts[1]) {
       const tanggal = parseIndonesianDate(parts.slice(1).join(' '));
       if (tanggal) {
@@ -504,10 +601,18 @@ async function handleMessage({ text, userId, authorized = true, channel = 'teleg
     const exact = handleExactCommand(firstWord, parts.slice(1).join(' '), channel);
     if (exact) {
       const result = await executeTool(exact.tool, exact.args);
-      const formatted = exact.tool.startsWith('get_tugas')
-        ? formatTugas(result, exact.title, channel)
-        : formatJadwal(result, exact.title, channel);
-      return renderQueryResult(formatted, exact.tool.startsWith('get_tugas') ? '📭 Tidak ada tugas.' : '📭 Tidak ada jadwal rapat.', channel);
+      let formatted, emptyText;
+      if (exact.tool.startsWith('get_tupoksi')) {
+        formatted = formatTupoksi(result, exact.title, channel);
+        emptyText = '📭 Tidak ada data tupoksi.';
+      } else if (exact.tool.startsWith('get_tugas')) {
+        formatted = formatTugas(result, exact.title, channel);
+        emptyText = '📭 Tidak ada tugas.';
+      } else {
+        formatted = formatJadwal(result, exact.title, channel);
+        emptyText = '📭 Tidak ada jadwal rapat.';
+      }
+      return renderQueryResult(formatted, emptyText, channel);
     }
 
     // ── Deteksi bahasa alami: jadwal → tugas → BBM → absensi ──

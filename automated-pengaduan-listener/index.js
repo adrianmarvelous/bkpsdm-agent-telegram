@@ -10,7 +10,8 @@
  *   2. GET  /pengaduan-spb/captcha.php → captcha (kirim ke Telegram, tunggu jawaban)
  *   3. POST /pengaduan-spb/login.php?captcha=KODE&act=ACT → login SPB (session server-side, TANPA JWT)
  *   4. GET  /pengaduan-spb/hotline.php → JSON data pengaduan (Bearer admin token)
- *   5. Bandingkan ticket ID vs state.json → ada baru? tandai; LAPORAN tiap 1 jam
+ *   5. Bandingkan ticket ID vs state.json → ada baru? tandai; LAPORAN tiap 2 jam
+ *      (jam genap WIB 12,14,16,18,20,22,00,02 — via REPORT_HOURS_WIB)
  *
  * Jalankan:
  *   node index.js                  → daemon (default interval 30 menit)
@@ -33,21 +34,27 @@ const SPB_BASE = `${API_BASE}/pengaduan-spb`;
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36';
 
 const INTERVAL_MS = (parseInt(process.env.PENGADUAN_INTERVAL_MINUTES || '30', 10) || 30) * 60 * 1000;
-// Laporan ke Telegram: tetap tiap 1 jam (polling 30 menit TIDAK berubah — hit API tetap 30 menit)
-const REPORT_INTERVAL_MS = (parseInt(process.env.PENGADUAN_REPORT_MINUTES || '60', 10) || 60) * 60 * 1000;
+// Laporan ke Telegram: tiap 2 jam pada jam genap WIB 12,14,16,18,20,22,00,02 (jadwal berbasis jam,
+// bukan interval relatif). Polling (cek hotline) TETAP tiap 30 menit — hit API tidak berubah.
+// Atur jam via env PENGADUAN_REPORT_HOURS (comma-separated, jam WIB).
+const REPORT_HOURS_WIB = (process.env.PENGADUAN_REPORT_HOURS || '12,14,16,18,20,22,0,2')
+  .split(',').map((s) => parseInt(s.trim(), 10)).filter((n) => !isNaN(n));
 const CAPTCHA_TIMEOUT_MS = 10 * 60 * 1000;
 const MAX_NEW_PER_CHECK = 5;
 
-// Window waktu aktif: 05:00 – 24:00 WIB (di luar jam itu listener diam)
-// Server timezone = +08 (Asia/Shanghai), WIB = +07 → jam WIB = jam server − 1
+// Window waktu aktif: 05:00 – 03:00 WIB (wrap melewati tengah malam, agar laporan
+// jam 00:00 & 02:00 WIB ikut terkirim). Server timezone = +08, WIB = UTC+7.
 const START_HOUR_WIB = parseInt(process.env.PENGADUAN_START_HOUR || '5', 10);
-const END_HOUR_WIB = parseInt(process.env.PENGADUAN_END_HOUR || '24', 10);
+const END_HOUR_WIB = parseInt(process.env.PENGADUAN_END_HOUR || '3', 10);
 
-/** Apakah sekarang termasuk window aktif (WIB)? */
+/** Apakah sekarang termasuk window aktif (WIB)? Mendukung wrap (mis. 5 → 3 = 05:00–02:59 WIB). */
 function isWithinWindow() {
   const now = new Date();
   const hourWib = (now.getUTCHours() + 7) % 24; // UTC+7 = WIB
-  return hourWib >= START_HOUR_WIB && hourWib < END_HOUR_WIB;
+  if (START_HOUR_WIB <= END_HOUR_WIB) {
+    return hourWib >= START_HOUR_WIB && hourWib < END_HOUR_WIB;
+  }
+  return hourWib >= START_HOUR_WIB || hourWib < END_HOUR_WIB;
 }
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -236,13 +243,16 @@ function parseWibTime(tglStr, jamStr) {
   return Date.UTC(Number(yStr), month, Number(dStr), (hh || 0) - 7, mm || 0, ss || 0);
 }
 
-/** Jumlah row yang masuk dalam `windowMs` terakhir (default 1 jam) */
-function countRecent(rows, windowMs = 60 * 60 * 1000) {
+/** Jumlah row yang masuk SEJAK 00.00 WIB hari ini (reset tengah malam, bukan rolling 24 jam) */
+function countRecent(rows) {
   const now = Date.now();
+  const WIB_OFFSET = 7 * 60 * 60 * 1000; // UTC+7
+  // Awal hari ini dalam WIB: floor(epoch-shifted / hari) lalu balik ke UTC ms
+  const dayStart = Math.floor((now + WIB_OFFSET) / 86400000) * 86400000 - WIB_OFFSET;
   let n = 0;
   for (const r of rows) {
     const t = parseWibTime(r.tgl, r.jam);
-    if (t !== null && now - t <= windowMs && t <= now + 60 * 60 * 1000) n++;
+    if (t !== null && t >= dayStart && t <= now + 60 * 60 * 1000) n++;
   }
   return n;
 }
@@ -259,7 +269,7 @@ function saveSession(session) {
 }
 
 function loadState() {
-  return readJson(STATE_FILE, { seenTicketIds: [], lastCheck: null, lastReportAt: 0 });
+  return readJson(STATE_FILE, { seenTicketIds: [], lastCheck: null, lastReportAt: 0, lastReportKey: null });
 }
 
 function saveState(state) {
@@ -350,7 +360,7 @@ function formatNewRows(rows) {
   return lines.join('\n');
 }
 
-/** Format laporan periodik (dikirim tiap 1 jam) — RINGKASAN singkat + jumlah 1 jam terakhir */
+/** Format laporan periodik (dikirim tiap 1 jam) — RINGKASAN singkat + jumlah sejak 00.00 WIB */
 function formatReport(rows, newRows, recentCount) {
   const waktu = new Date().toLocaleString('id-ID', {
     timeZone: 'Asia/Jakarta', day: '2-digit', month: 'short', year: 'numeric',
@@ -360,7 +370,7 @@ function formatReport(rows, newRows, recentCount) {
     `📊 <b>LAPORAN PENGADUAN SPB</b>`,
     `🕐 ${waktu} WIB`,
     `📋 Total: ${rows.length} pengaduan`,
-    `🕒 <b>${recentCount} pengaduan</b> dalam 1 jam terakhir`,
+    `🕒 <b>${recentCount} pengaduan</b> hari ini (sejak 00.00 WIB)`,
   ];
   if (newRows.length > 0) {
     lines.push(`🚨 <b>${newRows.length} pengaduan BARU</b>`);
@@ -456,25 +466,36 @@ function processRows(rows) {
 
   state.lastCheck = new Date().toISOString();
 
-  // Hit API tetap tiap 30 menit (interval polling), tapi LAPORAN hanya tiap 1 jam.
-  // lastReportAt (ms) disimpan di state.json — begitu lewat 60 menit, kirim laporan baru.
-  const now = Date.now();
-  const lastReportAt = state.lastReportAt || 0;
-  const due = now - lastReportAt >= REPORT_INTERVAL_MS;
+  // Hit API tetap tiap 30 menit (interval polling), tapi LAPORAN hanya pada jam genap WIB
+  // (12,14,16,18,20,22,00,02 — via REPORT_HOURS_WIB). Anti-duplikat: lastReportKey
+  // berisi "YYYY-MM-DD:HHWIB" dari laporan terakhir; laporan baru hanya jika jam sekarang
+  // termasuk jam laporan DAN key-nya beda (mencegah 2 laporan di jam yang sama).
+  const now = new Date();
+  const hourWib = (now.getUTCHours() + 7) % 24; // UTC+7 = WIB
+  const dateWib = new Date(now.getTime() + 7 * 3600 * 1000).toISOString().slice(0, 10);
+  const reportKey = `${dateWib}:${hourWib}`;
+  const isReportHour = REPORT_HOURS_WIB.includes(hourWib);
+  const due = isReportHour && state.lastReportKey !== reportKey;
 
   if (newRows.length > 0) {
-    log(`🚨 ${newRows.length} row baru ditemukan`);
+    // 🚨 ALERT INSTAN: pengaduan baru langsung dilaporkan saat pengecekan hotline (tiap 30 menit),
+    // TIDAK menunggu laporan terjadwal 2 jam. Laporan 2 jam tetap jalan sesuai jadwalnya.
+    log(`🚨 ${newRows.length} row baru ditemukan — kirim alert instan`);
+    tgSendText(formatNewRows(newRows));
   } else {
     log(`✅ Tidak ada row baru (total ${rows.length} row)`);
   }
 
   if (due) {
     const recentCount = countRecent(rows);
-    log(`📊 Kirim laporan (selang ${Math.round((now - lastReportAt) / 60000)} menit sejak terakhir)`);
+    log(`📊 Kirim laporan (jam laporan ${hourWib}:00 WIB)`);
     tgSendText(formatReport(rows, newRows, recentCount));
-    state.lastReportAt = now;
+    state.lastReportKey = reportKey;
+  } else if (!isReportHour) {
+    const nextHour = REPORT_HOURS_WIB.find((h) => h > hourWib) ?? REPORT_HOURS_WIB[0];
+    log(`⏳ Jam ${hourWib}:00 WIB bukan jam laporan — berikutnya ${nextHour}:00 WIB`);
   } else {
-    log(`⏳ Laporan berikutnya dalam ${Math.round((REPORT_INTERVAL_MS - (now - lastReportAt)) / 60000)} menit`);
+    log(`✅ Laporan jam ${hourWib}:00 WIB sudah terkirim (lastReportKey=${state.lastReportKey})`);
   }
 
   // Update seen — tandai semua row yang ada
@@ -526,7 +547,7 @@ async function main() {
     await checkOnce();
   } else {
     const h = new Date().getUTCHours() + 7;
-    log(`⏸️  Di luar window aktif (05:00–24:00 WIB, sekarang ${h % 24}:00 WIB) — diam`);
+    log(`⏸️  Di luar window aktif (05:00–03:00 WIB, sekarang ${h % 24}:00 WIB) — diam`);
   }
 
   if (process.argv.includes('--once')) {
@@ -542,7 +563,7 @@ async function main() {
       log(`⏸️  Di luar window aktif (sekarang ${h % 24}:00 WIB) — diam`);
     }
   }, INTERVAL_MS);
-  log(`⏱️  Cek berikutnya dalam ${INTERVAL_MS / 60000} menit (window 05:00–24:00 WIB)`);
+  log(`⏱️  Cek berikutnya dalam ${INTERVAL_MS / 60000} menit (window 05:00–03:00 WIB)`);
 }
 
 main().catch((e) => {

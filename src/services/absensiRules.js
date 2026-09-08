@@ -62,4 +62,28 @@ function countPulangCepat(anomali, tanggal) {
   return anomali.filter(a => isPulangCepat(a.jam_pulang, tanggal)).length;
 }
 
-module.exports = { parseJam, getPulangCepatThreshold, isPulangCepat, countPulangCepat };
+/**
+ * Status keterangan yang DIANGGAP NORMAL (bukan anomali):
+ *   H  = Hadir
+ *   DR = Dinas Luar (dianggap Hadir)
+ *   DL = Dinas Luar (varian kode, dianggap Hadir — ditambahkan 12 Agu 2026)
+ *   I  = Izin (dianggap Hadir — ditambahkan 12 Agu 2026)
+ * Status ini TIDAK boleh muncul di PDF absensi dan TIDAK dihitung anomali.
+ */
+function isKeteranganNormal(k) {
+  const u = (k || '').toUpperCase();
+  return u === 'H' || u === 'DR' || u === 'DL' || u === 'I';
+}
+
+/**
+ * Hitung jumlah pegawai berstatus normal (H/DR/DL/I) dari array anomali API.
+ * Dipakai untuk penyesuaian ringkasan: anomali -= N, normal += N.
+ * @param {Array} anomali  array anomali dari API
+ * @returns {number}
+ */
+function countKeteranganNormal(anomali) {
+  if (!Array.isArray(anomali)) return 0;
+  return anomali.filter(a => isKeteranganNormal(a.keterangan)).length;
+}
+
+module.exports = { parseJam, getPulangCepatThreshold, isPulangCepat, countPulangCepat, isKeteranganNormal, countKeteranganNormal };

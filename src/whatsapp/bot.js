@@ -4,8 +4,9 @@
  * Kulit WhatsApp untuk core dispatcher (src/core/dispatcher.js).
  * Logika SAMA dengan Telegram — adapter ini cuma:
  *   1. Dengar pesan masuk via Baileys
- *   2. Cek otorisasi (allowlist nomor WA dari env WA_ALLOWED_NUMBERS)
- *   3. Panggil handleMessage() → render Reply ke WhatsApp
+ *   2. Di grup (@g.us): hanya balas jika di-mention/tag (mention JID, @nomor, atau reply pesan bot)
+ *   3. Cek otorisasi (allowlist nomor WA dari env WA_ALLOWED_NUMBERS)
+ *   4. Panggil handleMessage() → render Reply ke WhatsApp
  *
  * WhatsApp tidak punya inline keyboard / HTML / Markdown, jadi:
  *   - reply 'menu'      → ditampilkan sebagai teks biasa
@@ -121,6 +122,34 @@ async function sendReply(sock, jid, reply) {
   await sock.sendMessage(jid, { text: waText(reply.text) });
 }
 
+// =============== NATURAL DELAY (anti-restriction, human-like) ===============
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+/** Acak integer [min, max) */
+function rand(min, max) {
+  return Math.floor(min + Math.random() * (max - min));
+}
+
+/** Jeda "membaca" pesan masuk: 2-4.5 dtk + bonus utk pesan panjang (max +1.5 dtk) */
+function readDelay(textLen) {
+  return rand(2000, 4500) + Math.min(Math.floor(textLen / 10), 1500);
+}
+
+/** Durasi "mengetik" proporsional panjang balasan (~16 karakter/detik) + jitter */
+function typingDelay(textLen) {
+  return Math.min(Math.max(Math.floor(textLen / 16), 900), 6000) + rand(0, 1500);
+}
+
+/** Presence update yang aman — gagal tidak boleh menggagalkan kirim pesan */
+async function safePresence(sock, state, jid) {
+  try {
+    await sock.sendPresenceUpdate(state, jid);
+  } catch (_) { /* non-fatal */ }
+}
+
 // =============== MAIN — Baileys WhatsApp Connection ===============
 
 async function startBot() {
@@ -184,6 +213,44 @@ async function startBot() {
     const text = m.message?.conversation || m.message?.extendedTextMessage?.text || '';
     if (!text) return;
 
+    // Di grup: hanya proses jika bot di-mention/tag — abaikan chat grup biasa
+    if (isGroup) {
+      const ctx = m.message?.extendedTextMessage?.contextInfo || {};
+      const myNumber = numberFromPnJid(sock.user.id);
+      // 1) Teks mengandung @nomor (diketik manual): @628xxx / @0821xxx
+      let isMentioned = text.includes('@' + myNumber) || text.includes('@0' + myNumber.slice(2));
+      // 2) mentionedJid — bisa format nomor HP ATAU LID (@lid) — resolve LID → nomor HP
+      if (!isMentioned) {
+        for (const jid of ctx.mentionedJid || []) {
+          const jidStr = String(jid);
+          if (numberFromPnJid(jidStr) === myNumber) {
+            isMentioned = true;
+            break;
+          }
+          const pn = await resolveNumber(sock, jidStr);
+          if (pn === myNumber) {
+            isMentioned = true;
+            break;
+          }
+        }
+      }
+      // 3) Reply/quote pesan bot (ctx.participant juga bisa LID)
+      if (!isMentioned && ctx.quotedMessage && ctx.participant) {
+        if (numberFromPnJid(ctx.participant) === myNumber) {
+          isMentioned = true;
+        } else {
+          const qpn = await resolveNumber(sock, ctx.participant);
+          if (qpn === myNumber) isMentioned = true;
+        }
+      }
+      if (!isMentioned) {
+        console.log(
+          `⏭️  Grup ${m.key.remoteJid}: bukan mention — diabaikan (mentionedJid=${JSON.stringify(ctx.mentionedJid || [])}, participant=${ctx.participant || '-'})`
+        );
+        return;
+      }
+    }
+
     const number = await resolveNumber(sock, senderJid);
     console.log(`📩 WA ${isGroup ? 'GRUP' : 'PRIBADI'} dari ${senderJid}${number ? ` (${number})` : ''}: ${text.slice(0, 80)}`);
 
@@ -195,16 +262,29 @@ async function startBot() {
       return;
     }
 
-    // Status "memproses" (tidak bisa di-delete seperti Telegram — tetap tampil)
-    await sock.sendMessage(replyJid, { text: '⏳ Mohon tunggu, sedang mencari data...' });
+    // Simulasi manusia: jeda "membaca" sebelum proses (bubble ⏳ dihapus —
+    // indikator mengetik sudah cukup sebagai sinyal "sedang bekerja")
+    await sleep(readDelay(text.length));
 
     try {
       const replies = await handleMessage({ text, userId: senderJid, authorized: true, channel: 'whatsapp' });
       for (const reply of replies) {
-        await sendReply(sock, replyJid, reply);
+        if (reply.type === 'document') {
+          // Kirim file: jeda singkat tanpa indikator mengetik
+          await sleep(rand(1500, 3000));
+          await sendReply(sock, replyJid, reply);
+        } else {
+          // Tampil "mengetik..." → tunggu sesuai panjang balasan → kirim → berhenti
+          await safePresence(sock, 'composing', replyJid);
+          await sleep(typingDelay((reply.text || '').length));
+          await safePresence(sock, 'paused', replyJid);
+          await sendReply(sock, replyJid, reply);
+          await sleep(rand(500, 1200)); // jeda antar balasan
+        }
       }
     } catch (err) {
       console.error('❌ WA error:', err.message);
+      await sleep(rand(1200, 2500));
       await sock.sendMessage(replyJid, { text: '😅 Maaf, terjadi kesalahan. Silakan coba lagi.' });
     }
   });

@@ -386,8 +386,29 @@ bot.onText(/\/tekocak\b(?: (.+))?/, async (msg, match) => {
     return runTekocakTask(chatId, 'generate', 'Generate Laporan');
   }
   if (cmd === 'update' || cmd === 'upd') {
-    if (nip) {
-      return runTekocakTask(chatId, 'update', `Update 1 Pegawai (NIP: ${nip})`, nip);
+    // /tekocak update <NIP>            → update 1 pegawai spesifik
+    // /tekocak update [tanggal] <tgl>  → update pegawai anomali di PDF absensi tanggal itu
+    // /tekocak update                  → update pegawai anomali di PDF absensi hari ini
+    const rest = parts.slice(1).join(' ').trim();
+    if (rest) {
+      const cleaned = rest.replace(/^tanggal\s+/i, '');
+      if (/^\d{16,18}$/.test(cleaned)) {
+        return runTekocakTask(chatId, 'update', `Update 1 Pegawai (NIP: ${cleaned})`, cleaned);
+      }
+      const tanggal = parseIndonesianDate(cleaned);
+      if (!tanggal) {
+        return bot.sendMessage(
+          chatId,
+          `❌ Argumen tidak dikenali: \`${cleaned}\`\n\n` +
+          `Contoh:\n` +
+          `• \`/tekocak update\` — update pegawai anomali di PDF absensi hari ini\n` +
+          `• \`/tekocak update <NIP>\` — update 1 pegawai spesifik\n` +
+          `• \`/tekocak update 2 september\` — update pegawai anomali di PDF absensi 2 Sep\n\n` +
+          `Format tanggal lain: \`2 september 2026\`, \`2026-09-02\`, \`02/09/2026\``,
+          { parse_mode: 'Markdown' }
+        );
+      }
+      return runTekocakTask(chatId, 'update', `Update Pegawai — PDF absensi ${tanggal}`, null, tanggal);
     }
     return runTekocakTask(chatId, 'update', 'Update Semua Pegawai');
   }
@@ -399,8 +420,9 @@ bot.onText(/\/tekocak\b(?: (.+))?/, async (msg, match) => {
       '`/tekocak login` — Login saja',
       '`/tekocak generate` — Generate laporan absensi (kemarin → hari ini)',
       '`/tekocak generate tanggal <tanggal>` — Generate laporan tanggal spesifik, contoh: `/tekocak generate tanggal 4 agustus`',
-      '`/tekocak update` — Update semua pegawai (66 NIP)',
+      '`/tekocak update` — Update pegawai anomali di PDF absensi hari ini',
       '`/tekocak update <NIP>` — Update 1 pegawai spesifik',
+      '`/tekocak update <tanggal>` — Update pegawai anomali di PDF absensi tanggal itu, contoh: `/tekocak update 2 september`',
       '`/tekocak help` — Bantuan ini',
       '',
       '⏱️ Update 66 NIP butuh beberapa menit. Untuk 1 NIP lebih cepat.',

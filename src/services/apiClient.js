@@ -10,9 +10,20 @@
  *   API_PASSWORD=BkpsdmSby@2024!
  */
 
-const BASE_URL = process.env.API_BASE_URL || 'https://bkpsdm.surabaya.go.id/api/ai-agent';
-const API_USERNAME = process.env.API_USERNAME;
-const API_PASSWORD = process.env.API_PASSWORD;
+// ⚠️ Baca env secara LAZY (bukan saat module load) — 3 Sep 2026:
+// dbTools.js me-require apiClient di top-level; kalau module ini ke-load SEBELUM
+// dotenv.config() jalan, credential ke-capture undefined → request tanpa token
+// → "Token tidak disertakan" (401). Dengan lazy-read, urutan require tidak relevan.
+const DEFAULT_BASE_URL = 'https://bkpsdm.surabaya.go.id/api/ai-agent';
+function baseUrl() {
+  return process.env.API_BASE_URL || DEFAULT_BASE_URL;
+}
+function apiCreds() {
+  return {
+    username: process.env.API_USERNAME,
+    password: process.env.API_PASSWORD,
+  };
+}
 const TIMEOUT_MS = 120000;
 
 // Token cache
@@ -49,16 +60,17 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
  * Login ke API backend untuk mendapatkan Bearer token
  */
 async function login() {
-  if (!API_USERNAME || !API_PASSWORD) {
+  const { username, password } = apiCreds();
+  if (!username || !password) {
     console.warn('⚠️ API_USERNAME / API_PASSWORD tidak dikonfigurasi. Gunakan API_TOKEN manual jika ada.');
     return;
   }
 
   try {
-    let res = await fetch(`${BASE_URL}/auth/login.php`, {
+    let res = await fetch(`${baseUrl()}/auth/login.php`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username: API_USERNAME, password: API_PASSWORD }),
+      body: JSON.stringify({ username, password }),
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });
 
@@ -66,10 +78,10 @@ async function login() {
     if (res.status >= 500) {
       console.log(`🔄 Login: server sibuk (HTTP ${res.status}), retry sekali...`);
       await sleep(3000);
-      res = await fetch(`${BASE_URL}/auth/login.php`, {
+      res = await fetch(`${baseUrl()}/auth/login.php`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username: API_USERNAME, password: API_PASSWORD }),
+        body: JSON.stringify({ username, password }),
         signal: AbortSignal.timeout(TIMEOUT_MS),
       });
     }
@@ -94,12 +106,13 @@ async function login() {
  * Memastikan token masih valid, login ulang jika expired
  */
 async function ensureToken() {
+  const { username, password } = apiCreds();
   // Coba login jika belum punya token
-  if (!authToken && API_USERNAME && API_PASSWORD) {
+  if (!authToken && username && password) {
     await login();
   }
   // Login ulang jika expired
-  if (authToken && Date.now() > tokenExpiry && API_USERNAME && API_PASSWORD) {
+  if (authToken && Date.now() > tokenExpiry && username && password) {
     console.log('🔄 Token expired, login ulang...');
     await login();
   }
@@ -112,7 +125,7 @@ async function ensureToken() {
 async function request(method, path, body = null) {
   await ensureToken();
 
-  const url = `${BASE_URL}${path}`;
+  const url = `${baseUrl()}${path}`;
   const headers = { 'Content-Type': 'application/json' };
 
   // Tambahkan Bearer token jika ada
@@ -130,7 +143,8 @@ async function request(method, path, body = null) {
   let res = await fetch(url, options);
 
   // Jika 401 (Unauthorized), coba login ulang sekali
-  if (res.status === 401 && API_USERNAME && API_PASSWORD) {
+  const { username, password } = apiCreds();
+  if (res.status === 401 && username && password) {
     console.log('🔄 Token ditolak (401), login ulang...');
     await login();
     headers['Authorization'] = `Bearer ${authToken}`;
@@ -235,6 +249,28 @@ async function deleteTugasById(id) {
   return await request('DELETE', `/tugas/hapus.php?id=${encodeURIComponent(id)}`);
 }
 
+// ===================== TUGAS POKOK & FUNGSI (TUPOKSI) =====================
+
+/** GET /api/ai-agent/tugas-tupoksi/hari-ini.php
+ * Response: { date, count, rows: [...] } atau { message } saat kosong.
+ */
+async function getTupoksiHariIni() {
+  const data = await request('GET', '/tugas-tupoksi/hari-ini.php');
+  return data.rows && data.rows.length > 0
+    ? data.rows
+    : { message: data.message || 'Tidak ada data tupoksi untuk hari ini' };
+}
+
+/** GET /api/ai-agent/tugas-tupoksi/tanggal.php?date=YYYY-MM-DD
+ * Response: { date, count, rows: [...] } atau { message } saat kosong.
+ */
+async function getTupoksiByTanggal(tanggal) {
+  const data = await request('GET', `/tugas-tupoksi/tanggal.php?date=${encodeURIComponent(tanggal)}`);
+  return data.rows && data.rows.length > 0
+    ? data.rows
+    : { message: data.message || `Tidak ada data tupoksi untuk tanggal ${tanggal}` };
+}
+
 // ===================== HEALTH CHECK =====================
 
 /** GET /api/ai-agent/health.php */
@@ -293,6 +329,9 @@ module.exports = {
   getSemuaTugas,
   createTugas,
   deleteTugasById,
+  // Tupoksi
+  getTupoksiHariIni,
+  getTupoksiByTanggal,
   // BBM
   getBbmNonFosilHariIni,
   getBbmNonFosilByTanggal,
