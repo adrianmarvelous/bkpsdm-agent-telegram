@@ -34,10 +34,10 @@ const SPB_BASE = `${API_BASE}/pengaduan-spb`;
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36';
 
 const INTERVAL_MS = (parseInt(process.env.PENGADUAN_INTERVAL_MINUTES || '30', 10) || 30) * 60 * 1000;
-// Laporan ke Telegram: tiap 2 jam pada jam genap WIB 12,14,16,18,20,22,00,02 (jadwal berbasis jam,
-// bukan interval relatif). Polling (cek hotline) TETAP tiap 30 menit — hit API tidak berubah.
-// Atur jam via env PENGADUAN_REPORT_HOURS (comma-separated, jam WIB).
-const REPORT_HOURS_WIB = (process.env.PENGADUAN_REPORT_HOURS || '12,14,16,18,20,22,0,2')
+// Laporan ringkasan 2 jam ke Telegram: NONAKTIF (dimatikan 8 Sep 2026 atas permintaan user).
+// Polling hotline tiap 30 menit + alert instan pengaduan baru TETAP AKTIF.
+// Untuk mengaktifkan lagi: set env PENGADUAN_REPORT_HOURS, mis. '12,14,16,18,20,22,0,2' (jam WIB).
+const REPORT_HOURS_WIB = (process.env.PENGADUAN_REPORT_HOURS || '')
   .split(',').map((s) => parseInt(s.trim(), 10)).filter((n) => !isNaN(n));
 const CAPTCHA_TIMEOUT_MS = 10 * 60 * 1000;
 const MAX_NEW_PER_CHECK = 5;
@@ -103,9 +103,14 @@ function toWaText(s) {
     .trim();
 }
 
-/** Kirim teks alert ke semua nomor WA tujuan via bridge bot (fire-and-forget, error tidak fatal) */
+/**
+ * Kirim teks alert ke semua nomor WA tujuan via bridge bot.
+ * Return true HANYA jika semua nomor sukses — dipakai pemanggil untuk menentukan
+ * apakah row baru boleh ditandai "sudah terkirim" (anti notifikasi hilang).
+ */
 async function waSendAlert(text) {
-  if (WA_ALERT_NUMBERS.length === 0) return;
+  if (WA_ALERT_NUMBERS.length === 0) return true; // tanpa target = bukan kegagalan
+  let allOk = true;
   for (const num of WA_ALERT_NUMBERS) {
     try {
       const res = await fetch(WA_BRIDGE_URL, {
@@ -114,12 +119,14 @@ async function waSendAlert(text) {
         body: JSON.stringify({ token: WA_BRIDGE_TOKEN, text: toWaText(text), to: num }),
       });
       const data = await res.json().catch(() => ({}));
-      if (!data.ok) log('⚠️  waSendAlert gagal ke', num + ':', res.status, JSON.stringify(data).slice(0, 150));
+      if (!data.ok) { allOk = false; log('⚠️  waSendAlert gagal ke', num + ':', res.status, JSON.stringify(data).slice(0, 150)); }
       else log('✅ Alert WA terkirim ke', num);
     } catch (e) {
+      allOk = false;
       log('⚠️  waSendAlert error ke', num + ':', e.message, '(bot bkpsdm-wa hidup? bridge ada di proses itu)');
     }
   }
+  return allOk;
 }
 
 // ===================== TELEGRAM =====================
@@ -127,7 +134,7 @@ async function waSendAlert(text) {
 async function tgSendText(text) {
   if (!TELEGRAM_TOKEN || !CHAT_ID) {
     log('⚠️  TELEGRAM_TOKEN/CHAT_ID tidak ada — notif dilewati');
-    return;
+    return false;
   }
   try {
     const res = await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
@@ -135,10 +142,15 @@ async function tgSendText(text) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ chat_id: CHAT_ID, text, parse_mode: 'HTML', disable_web_page_preview: true }),
     });
-    if (!res.ok) log('⚠️  tgSendText gagal:', res.status, (await res.text()).slice(0, 200));
+    if (!res.ok) {
+      log('⚠️  tgSendText gagal:', res.status, (await res.text()).slice(0, 200));
+      return false;
+    }
   } catch (e) {
     log('⚠️  tgSendText error:', e.message);
+    return false;
   }
+  return true;
 }
 
 async function tgSendPhoto(photoPath, caption) {
@@ -494,10 +506,10 @@ async function checkOnce() {
     }
   }
 
-  processRows(rows.map(normalizeRow));
+  await processRows(rows.map(normalizeRow));
 }
 
-function processRows(rows) {
+async function processRows(rows) {
   const state = loadState();
   const seen = new Set(state.seenTicketIds || []);
   const newRows = rows.filter((r) => r.ticketId && !seen.has(r.ticketId));
@@ -519,13 +531,36 @@ function processRows(rows) {
     // 🚨 ALERT INSTAN: pengaduan baru langsung dilaporkan saat pengecekan hotline (tiap 30 menit),
     // TIDAK menunggu laporan terjadwal 2 jam. Laporan 2 jam tetap jalan sesuai jadwalnya.
     log(`🚨 ${newRows.length} row baru ditemukan — kirim alert instan`);
-    tgSendText(formatNewRows(newRows));
-    waSendAlert(formatNewRows(newRows)); // 🔔 + kirim ke WA nomor tujuan (via bridge bot bkpsdm-wa)
+    const pesanAlert = formatNewRows(newRows);
+    let okTg = await tgSendText(pesanAlert);
+    let okWa = await waSendAlert(pesanAlert); // 🔔 WA via bridge bot bkpsdm-wa
+
+    // Kalau salah satu saluran gagal (mis. bot WA belum selesai connect setelah restart),
+    // tunggu sebentar lalu coba SEKALI lagi sebelum menyerah.
+    if (!okTg || !okWa) {
+      log('🔁 Kirim alert gagal sebagian — coba sekali lagi setelah 20 detik...');
+      await sleep(20000);
+      if (!okTg) okTg = await tgSendText(pesanAlert);
+      if (!okWa) okWa = await waSendAlert(pesanAlert);
+    }
+
+    if (!okTg || !okWa) {
+      // PENTING: JANGAN tandai row baru sebagai "seen" kalau alert belum terkirim —
+      // supaya polling berikutnya mencoba lagi dan notifikasi tidak hilang diam-diam.
+      log(`❌ Alert GAGAL terkirim (TG=${okTg}, WA=${okWa}) — row TIDAK ditandai terkirim, akan dicoba di polling berikutnya`);
+      state.seenTicketIds = [...seen];
+      saveState(state);
+      return;
+    }
+    log('✅ Alert terkirim ke Telegram & WhatsApp');
   } else {
     log(`✅ Tidak ada row baru (total ${rows.length} row)`);
   }
 
-  if (due) {
+  if (REPORT_HOURS_WIB.length === 0) {
+    // Laporan 2 jam nonaktif — cukup catat sekali per cek tanpa spam berikutnya.
+    log('📭 Laporan ringkasan 2 jam NONAKTIF (polling + alert instan tetap jalan)');
+  } else if (due) {
     const recentCount = countRecent(rows);
     log(`📊 Kirim laporan (jam laporan ${hourWib}:00 WIB)`);
     tgSendText(formatReport(rows, newRows, recentCount));
