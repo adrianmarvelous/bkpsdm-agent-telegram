@@ -61,6 +61,23 @@ if (FORWARD_NUMBER) {
 const lidToPnCache = new Map();
 const LID_CACHE_FILE = path.join(__dirname, 'lid-pn-cache.json');
 
+// =============== CACHE PESAN TERKIRIM (untuk getMessage) ===============
+// Baileys memanggil getMessage() saat penerima mengirim RETRY RECEIPT
+// (HP tidak bisa mendekripsi pesan kita). Tanpa cache ini, bot tidak bisa
+// mengirim ulang → HP menampilkan "Waiting for this message" SELAMANYA.
+const MESSAGE_CACHE_MAX = 200;
+const messageCache = new Map();
+
+function cacheMessage(m) {
+  try {
+    if (!m || !m.key || !m.key.id || !m.message) return;
+    messageCache.set(m.key.id, m.message);
+    if (messageCache.size > MESSAGE_CACHE_MAX) {
+      messageCache.delete(messageCache.keys().next().value); // buang yang paling lama
+    }
+  } catch (_) {}
+}
+
 // Cache LID→PN PERSISTEN: kalau cuma di memori, mapping hilang tiap restart →
 // pesan dari @lid yang belum ke-cache dianggap tidak punya akses (⛔).
 // Catatan: Baileys 6.7.24 TIDAK punya signalRepository.lidMapping.getPNForLID —
@@ -78,6 +95,43 @@ function persistLidCache() {
     fs.writeFileSync(LID_CACHE_FILE, JSON.stringify(Object.fromEntries(lidToPnCache), null, 0));
   } catch (e) {
     console.warn('⚠️ Gagal simpan LID cache: ' + e.message);
+  }
+}
+
+/**
+ * TANYAKAN LID ke WhatsApp untuk setiap nomor di allowlist.
+ * onWhatsApp() Baileys 6.7.24 memakai USyncQuery.withLIDProtocol() dan mengembalikan
+ * { jid, exists, lid } — jadi LID tidak perlu "ditunggu" dari event lid-mapping.update
+ * (event itu jarang/tidak selalu datang; pasca pairing ulang identitas perangkat baru
+ * membuat LID kontak belum terekam → pesan pertamanya kena ⛔).
+ * Dipakai saat connect + sebagai self-heal ketika ada pesan dari LID tak dikenal.
+ */
+let lastLidSeedAt = 0;
+const LID_SEED_COOLDOWN_MS = 60 * 1000; // jangan hammer server
+const warnedUnknownLids = new Set(); // peringatan LID tak dikenal cukup SEKALI per LID
+async function seedLidCacheFromAllowlist(sock, { force = false } = {}) {
+  if (ALLOWED_NUMBERS.length === 0) return 0;
+  if (!force && Date.now() - lastLidSeedAt < LID_SEED_COOLDOWN_MS) return 0;
+  lastLidSeedAt = Date.now();
+  try {
+    const res = await sock.onWhatsApp(...ALLOWED_NUMBERS.map((n) => n + '@s.whatsapp.net'));
+    let added = 0;
+    for (const r of res || []) {
+      if (!r?.lid || !r?.jid) continue;
+      const lid = String(r.lid);
+      const pn = String(r.jid);
+      if (lidToPnCache.get(lid) !== pn) { lidToPnCache.set(lid, pn); added++; }
+      const hosted = lid.replace(/@lid$/, '@hosted.lid'); // sebagian WA pakai bentuk @hosted.lid
+      if (hosted !== lid && lidToPnCache.get(hosted) !== pn) { lidToPnCache.set(hosted, pn); added++; }
+    }
+    if (added > 0) {
+      persistLidCache();
+      console.log(`🗂️ LID di-seed dari allowlist: +${added} entri (total ${lidToPnCache.size})`);
+    }
+    return added;
+  } catch (e) {
+    console.warn('⚠️ Seed LID gagal: ' + e.message);
+    return 0;
   }
 }
 
@@ -109,6 +163,7 @@ async function resolveNumber(sock, jid) {
     return numberFromPnJid(lidToPnCache.get(jidStr));
   }
 
+  // Jalur cadangan (hanya ada di Baileys versi lama)
   try {
     const pn = await sock?.signalRepository?.lidMapping?.getPNForLID(jidStr);
     if (pn) {
@@ -116,11 +171,21 @@ async function resolveNumber(sock, jid) {
       persistLidCache();
       return numberFromPnJid(pn);
     }
-  } catch (err) {
-    console.warn(`⚠️ Gagal resolve LID ${jidStr}: ${err.message}`);
+  } catch (_) { /* tidak tersedia di 6.7.24 — lanjut ke self-heal */ }
+
+  // SELF-HEAL: LID belum dikenal → tanyakan LID semua nomor allowlist ke WhatsApp,
+  // lalu coba lagi. Inilah yang membuat kontak baru / pasca-pairing-ulang tetap
+  // dikenali tanpa restart (sebelumnya: ⛔ "tidak memiliki akses" padahal nomornya allowed).
+  await seedLidCacheFromAllowlist(sock);
+  if (lidToPnCache.has(jidStr)) {
+    return numberFromPnJid(lidToPnCache.get(jidStr));
   }
 
-  // LID tidak bisa dicocokkan dengan allowlist nomor HP → tolak
+  // LID tidak bisa dicocokkan dengan allowlist nomor HP → tolak (peringatan sekali saja)
+  if (!warnedUnknownLids.has(jidStr)) {
+    warnedUnknownLids.add(jidStr);
+    console.warn(`⚠️ LID tidak dikenal: ${jidStr} — tidak bisa dicocokkan ke allowlist (diabaikan)`);
+  }
   return null;
 }
 
@@ -147,18 +212,19 @@ async function sendReply(sock, jid, reply) {
 
   if (reply.type === 'document') {
     const data = fs.readFileSync(reply.path);
-    await sock.sendMessage(jid, {
+    const sent = await sock.sendMessage(jid, {
       document: data,
       fileName: path.basename(reply.path),
       mimetype: 'application/pdf',
       caption: reply.caption ? waText(reply.caption) : undefined,
     });
+    cacheMessage(sent);
     try { fs.unlinkSync(reply.path); } catch (_) {}
     return;
   }
 
   // type: 'text' | 'menu' (menu → teks biasa, WA tidak ada inline keyboard)
-  await sock.sendMessage(jid, { text: waText(reply.text) });
+  cacheMessage(await sock.sendMessage(jid, { text: waText(reply.text) }));
 }
 
 // =============== FORWARDER HELPERS ===============
@@ -237,12 +303,13 @@ function forwardHeader(gname, senderLabel, now) {
 async function sendForward(sock, m, senderJid) {
   if (!FORWARD_NUMBER) return;
 
-  // Jangan echo-balik pesan dari nomor tujuan itu sendiri (dia sudah melihat isi grup)
+  // Anti-echo DIHAPUS (9 Sep 2026, permintaan user): forward SEMUA pesan ber-kata kunci
+  // dari nomor mana pun — termasuk dari nomor tujuan sendiri. resolveNumber tetap dipakai
+  // untuk label pengirim di header (senderPn bisa null untuk LID tanpa cache → label apa adanya).
   let senderPn = null;
   try {
     senderPn = await resolveNumber(sock, senderJid);
   } catch (_) { /* LID tak ter-resolve → tetap lanjut */ }
-  if (senderPn && senderPn === FORWARD_NUMBER) return;
 
   const gname = await monitorGroupName(sock, m.key.remoteJid);
   const senderLabel =
@@ -351,6 +418,14 @@ const BRIDGE_PORT = parseInt(process.env.WA_BRIDGE_PORT || '8787', 10);
 const BRIDGE_TOKEN = process.env.WA_BRIDGE_TOKEN || '572182ec20aa6d9202f0f0bb';
 const BRIDGE_DEFAULT_TO = process.env.WA_BRIDGE_TO || FORWARD_NUMBER; // default: nomor forwarder
 let activeSock = null; // socket WA aktif (di-update tiap reconnect)
+// Nomor generasi socket: dinaikkan tiap startBot(). Socket LAMA tetap punya
+// listener sendiri — tanpa penjaga ini ia ikut memproses pesan yang sama dan
+// memproses `creds.update` yang basi, sehingga store sesi libsignal desync:
+// muncul `MessageCounterError: Key used already` (dekripsi ganda) + `Bad MAC`,
+// dan pesan KELUAR dienkripsi dengan ratchet yang tak bisa dicocokkan penerima
+// → di HP penerima tampil "Waiting for this message" (FAQ WhatsApp 26000015).
+let waGeneration = 0;
+let reconnectTimer = null;
 let bridgeStarted = false;
 
 function startWaBridge() {
@@ -372,7 +447,7 @@ function startWaBridge() {
         const target = String(to || BRIDGE_DEFAULT_TO || '').replace(/[^0-9]/g, '');
         if (!target) return send(400, { ok: false, error: 'nomor tujuan kosong' });
         if (!activeSock?.user) return send(503, { ok: false, error: 'WA belum connect' });
-        await activeSock.sendMessage(target + '@s.whatsapp.net', { text: String(text) });
+        cacheMessage(await activeSock.sendMessage(target + '@s.whatsapp.net', { text: String(text) }));
         console.log(`🔔 Bridge WA: pesan terkirim ke ${target}: ${String(text).slice(0, 60)}`);
         send(200, { ok: true });
       } catch (e) {
@@ -422,13 +497,30 @@ async function startBot() {
   const sock = makeWASocket({
     auth: state,
     printQRInTerminal: false,
+    // Dipakai Baileys untuk menjawab retry receipt: ambil pesan asli dari cache
+    // lalu kirim ulang dengan sesi baru supaya HP bisa mendekripsi.
+    getMessage: async (key) => {
+      if (!key || !key.id) return undefined;
+      return messageCache.get(key.id);
+    },
   });
+
+  const gen = ++waGeneration;
+
+  // Matikan socket lama (kalau masih hidup) SEBELUM socket baru ini berjalan.
+  // Dua socket pada auth_state yang sama = dekripsi ganda & kunci bentrok.
+  if (activeSock && activeSock !== sock) {
+    try { activeSock.ev.removeAllListeners(); } catch (_) {}
+    try { activeSock.end(undefined); } catch (_) {}
+    activeSock = null;
+  }
 
   // Bridge WA (kirim dari proses lain via localhost) — ikut socket aktif terbaru
   activeSock = sock;
   startWaBridge();
 
   sock.ev.on('connection.update', async (update) => {
+    if (gen !== waGeneration) return; // socket lama — abaikan
     const { connection, lastDisconnect, qr } = update;
 
     if (qr) {
@@ -446,24 +538,34 @@ async function startBot() {
     if (connection === 'open') {
       console.log('✅ Bot terhubung ke WhatsApp!');
       console.log(`📱 Nomor: ${sock.user.id.split(':')[0]}`);
+      // Pelajari LID nomor allowlist sedini mungkin, supaya pesan pertama dari
+      // kontak (yang datang sebagai @lid) tidak kena ⛔.
+      seedLidCacheFromAllowlist(sock, { force: true }).catch(() => {});
     }
 
     if (connection === 'close') {
       const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
       console.log(`❌ Koneksi terputus. Reconnect: ${shouldReconnect}`);
       if (shouldReconnect) {
+        // WAJIB teardown dulu: tanpa ini socket lama tetap hidup, ikut mendekripsi
+        // pesan yang sama (MessageCounterError "Key used already") dan menyimpan
+        // creds.update basi → store sesi rusak.
+        try { sock.ev.removeAllListeners(); } catch (_) {}
+        try { sock.end(undefined); } catch (_) {}
+        if (reconnectTimer) { console.log('⏳ Reconnect sudah dijadwalkan — dilewati.'); return; }
         console.log('⏳ Coba reconnect dalam 5 detik...');
-        setTimeout(() => startBot(), 5000);
+        reconnectTimer = setTimeout(() => { reconnectTimer = null; startBot(); }, 5000);
       } else {
         console.log('⚠️ Bot logout. Hapus folder auth_info/ untuk login ulang.');
       }
     }
   });
 
-  sock.ev.on('creds.update', saveCreds);
+  sock.ev.on('creds.update', (...a) => { if (gen === waGeneration) return saveCreds(...a); });
 
   // Simpan mapping LID → nomor HP begitu Baileys memberitahu (dan persist ke file)
   sock.ev.on('lid-mapping.update', ({ lid, pn }) => {
+    if (gen !== waGeneration) return; // socket lama — abaikan
     if (lid && pn) {
       lidToPnCache.set(String(lid), String(pn));
       persistLidCache();
@@ -471,6 +573,8 @@ async function startBot() {
   });
 
   sock.ev.on('messages.upsert', async ({ messages }) => {
+    if (gen !== waGeneration) return; // socket lama — abaikan (cegah balasan ganda)
+    for (const raw of messages) cacheMessage(raw); // simpan termasuk echo pesan kita sendiri
     const m = messages[0];
     if (!m.key || !m.key.remoteJid || m.key.fromMe) return;
     if (m.key.remoteJid.endsWith('@broadcast')) return;
@@ -538,10 +642,13 @@ async function startBot() {
     console.log(`📩 WA ${isGroup ? 'GRUP' : 'PRIBADI'} dari ${senderJid}${number ? ` (${number})` : ''}: ${text.slice(0, 80)}`);
 
     if (!(await isAuthorized(sock, senderJid))) {
-      // Di grup: jangan balas "tidak punya akses" agar tidak spam untuk semua anggota
-      if (!isGroup) {
-        await sock.sendMessage(replyJid, { text: '⛔ Anda tidak memiliki akses ke bot ini.' });
-      }
+      // KEBIJAKAN (10 Sep 2026, permintaan user): hanya LAYANI 2 nomor di
+      // WA_ALLOWED_NUMBERS + grup yang memuat kata kunci FORWARD_KEYWORD ("hadir").
+      // Pengirim lain DIABAIKAN SENYAP — dulu dibalas "⛔ Anda tidak memiliki akses",
+      // sekarang tidak, supaya bot tidak membocorkan keberadaannya dan tidak
+      // berdebat dengan orang asing. Nomor allowed yang LID-nya belum terpetakan
+      // tetap dilayani lewat self-heal seedLidCacheFromAllowlist() di resolveNumber().
+      console.log(`⏭️  WA ${isGroup ? 'GRUP' : 'PRIBADI'} dari ${senderJid}: di luar allowlist — diabaikan (tanpa balasan)`);
       return;
     }
 
