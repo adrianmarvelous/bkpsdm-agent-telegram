@@ -34,6 +34,45 @@ const CHAT_ID = process.env.ORGANISASI_CHAT_ID
   || null;
 const ONCE = process.argv.includes('--once');
 
+// ===================== WA BRIDGE (kirim via bot bkpsdm-wa, localhost) =====================
+// Monitor TIDAK boleh buka koneksi WA sendiri (2 koneksi session sama = di-kick).
+// Alert WA dikirim lewat bridge HTTP di dalam proses bot (src/whatsapp/bot.js),
+// pola identik automated-pengaduan-listener.
+const WA_BRIDGE_URL = process.env.WA_BRIDGE_URL || 'http://127.0.0.1:8787/wa/send';
+const WA_BRIDGE_TOKEN = process.env.WA_BRIDGE_TOKEN || '572182ec20aa6d9202f0f0bb';
+// Nomor WA penerima alert (pisah koma) — default sama dengan alert pengaduan hotline
+const WA_ALERT_NUMBERS = (process.env.WA_ALERT_NUMBERS || '6282244649994,6281216435394')
+  .split(',')
+  .map((s) => s.trim().replace(/[^0-9]/g, ''))
+  .filter((s) => s.length > 0);
+
+/** <b>…</b> → *…*, tag HTML lain dihapus (WA tidak render HTML) */
+function toWaText(s) {
+  return String(s || '')
+    .replace(/<b>(.*?)<\/b>/g, '*$1*')
+    .replace(/<[^>]+>/g, '')
+    .trim();
+}
+
+/** Kirim teks alert ke semua nomor WA tujuan via bridge bot (fire-and-forget, error tidak fatal) */
+async function waSendAlert(text) {
+  if (WA_ALERT_NUMBERS.length === 0) return;
+  for (const num of WA_ALERT_NUMBERS) {
+    try {
+      const res = await fetch(WA_BRIDGE_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: WA_BRIDGE_TOKEN, text: toWaText(text), to: num }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!data.ok) log('⚠️  waSendAlert gagal ke', num + ':', res.status, JSON.stringify(data).slice(0, 150));
+      else log('✅ Alert WA terkirim ke', num);
+    } catch (e) {
+      log('⚠️  waSendAlert error ke', num + ':', e.message, '(bot bkpsdm-wa hidup? bridge ada di proses itu)');
+    }
+  }
+}
+
 // ===================== UTIL =====================
 
 function log(...args) { console.log(`[${new Date().toISOString()}]`, ...args); }
@@ -137,9 +176,21 @@ async function checkOnce() {
   }
 
   if (!page.loggedIn) {
-    log('⚠️  Sesi login sudah tidak valid (terlempar ke halaman login).');
-    await tgSend('⚠️ <b>Monev Organisasi — sesi login habis.</b>\nMonitor berhenti. Silakan login ulang untuk memperbarui session.json.');
-    if (!ONCE) process.exit(1);
+    const st = readJson(STATE_FILE, {});
+    if (!st.sessionAlertSent) {
+      // Alert cukup SEKALI per periode sesi invalid — anti-spam (PM2 restart loop dulu
+      // mengirim pesan berulang ke Telegram tiap restart).
+      log('⚠️  Sesi login sudah tidak valid (terlempar ke halaman login).');
+      await tgSend('⚠️ <b>Monev Organisasi — sesi login habis.</b>\nMonitor berhenti. Silakan login ulang untuk memperbarui session.json.');
+      st.sessionAlertSent = true;
+      st.sessionInvalidSince = new Date().toISOString();
+      writeJson(STATE_FILE, st);
+    } else {
+      log('⏳ Sesi masih invalid — alert sudah pernah dikirim, tidak kirim ulang (anti-spam).');
+    }
+    if (ONCE) process.exit(1);
+    // Daemon: JANGAN exit — tetap hidup & polling diam sampai session.json diperbarui
+    // (login ulang via `node index.js`). PM2 tidak restart-loop, Telegram tidak spam.
     return;
   }
 
@@ -149,6 +200,13 @@ async function checkOnce() {
 
   const state = readJson(STATE_FILE, {});
   const seen = new Set(state.seenRows || []);
+
+  // Sesi valid lagi → reset flag alert (login ulang sudah dilakukan); tersimpan via writeJson di akhir.
+  if (state.sessionAlertSent) {
+    log('✅ Sesi pulih — flag alert login di-reset.');
+    state.sessionAlertSent = false;
+    delete state.sessionInvalidSince;
+  }
 
   // Baris baru = yang belum pernah terlihat sebelumnya
   const newRows = rows.filter((r) => !seen.has(r.signature));
@@ -166,6 +224,10 @@ async function checkOnce() {
     });
     if (newRows.length > MAX_NOTIFY) msg += `\n\n…dan ${newRows.length - MAX_NOTIFY} baris lainnya.`;
     await tgSend(msg);
+    // 🔔 + kirim ke WA nomor tujuan (via bridge bot bkpsdm-wa) — pola sama pengaduan hotline.
+    // Link <a href> diganti URL mentah dulu (WA tidak render HTML, URL harus bisa diklik/di-copy).
+    const waMsg = msg.replace(`<a href="${MONITOR_URL}">Buka halaman approval</a>`, MONITOR_URL);
+    await waSendAlert(waMsg);
   } else {
     log(`✓ Tidak ada baris baru (${rows.length} baris).`);
   }

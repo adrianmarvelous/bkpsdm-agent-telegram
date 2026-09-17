@@ -24,7 +24,25 @@ automated-pengaduan-listener/captcha_answer.txt
 # Organisasi IKO Monitor — session & state jangan di-commit
 automated-organisasi-iko/session.json
 automated-organisasi-iko/state.json
+# File transient captcha manual (dibuat saat AI gagal baca captcha)
+automated-organisasi-iko/pending_captcha.json
+automated-organisasi-iko/captcha_answer.txt
+
+# automated-esurat — output undangan (memuat nama & NIP pegawai)
+automated-esurat/undangan/*.json
+automated-esurat/reminder-state.json
+automated-esurat/logs/
 
 # File test / percobaan sekali pakai
 test_*.js
 src/services/tekocak_new.js
+
+# Backup .env — berisi kredensial asli, JANGAN pernah di-commit
+.env.bak.*
+.env.*.bak
+*.env.backup
+
+# Captcha hasil generate & skrip sampel lokal (transient)
+automated-organisasi-iko/captcha_auto.png
+automated-organisasi-iko/gen-captcha-samples.js
+automated-organisasi-iko/tmp-test-*.js

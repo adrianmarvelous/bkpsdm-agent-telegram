@@ -7,6 +7,7 @@ const { startDisposisi, getDisposisiState, clearDisposisiState, saveDisposisi, d
 const tekocak = require('../services/tekocak');
 const kantorkuWfh = require('../services/kantorkuWfh');
 const fs = require('fs');
+const path = require('path'); // dipakai blok forward captcha (CAPTCHA_DIRS) — sebelumnya HILANG → ReferenceError tiap pesan teks biasa
 const { generateAbsensiPdf } = require('../services/pdfGenerator');
 const { isPulangCepat, countPulangCepat } = require('../services/absensiRules');
 const { executeTool, parseIndonesianDate } = require('../services/dbTools');
@@ -116,6 +117,7 @@ Saya adalah asisten AI yang siap membantu Anda! 🎉
 • 📋 Cek tugas dan disposisi dari SIJAKA
 • 🤖 Automasi absensi TEKO-CAK
 • 📊 Cek absensi & BBM Non-Fosil
+• 📨 Cek undangan eSurat (unit Sekretariat)
 • 🧠 Didukung AI dari OpenRouter
 
 👇 *Pilih menu di bawah atau ketik perintah langsung:*
@@ -130,6 +132,7 @@ Saya adalah asisten AI yang siap membantu Anda! 🎉
         [{ text: '📋 Tugas Hari Ini', callback_data: 'cmd_tugas_hariini' }, { text: '📋 Tugas Besok', callback_data: 'cmd_tugas_besok' }],
         [{ text: '📋 Semua Tugas', callback_data: 'cmd_tugas_semua' }, { text: '📊 Absensi', callback_data: 'cmd_absensi' }],
         [{ text: '🛢️ BBM Non-Fosil', callback_data: 'cmd_bbm' }, { text: '🤖 TEKO-CAK', callback_data: 'menu_tekocak' }],
+        [{ text: '📨 Undangan Hari Ini', callback_data: 'cmd_undangan_hariini' }, { text: '📨 Undangan Besok', callback_data: 'cmd_undangan_besok' }],
         [{ text: 'ℹ️ Status', callback_data: 'menu_status' }, { text: '❓ Bantuan', callback_data: 'menu_help' }],
       ]
     }
@@ -776,13 +779,20 @@ bot.on('message', async (msg) => {
     );
   }
 
-  // ── Pengaduan Listener: forward jawaban captcha ke file ──
-  // Jika ada pending_captcha.json, teks user dianggap kode captcha
-  // dan ditulis ke captcha_answer.txt untuk dibaca listener.
+  // ── Forward jawaban captcha ke file (pola generik: satu folder per automation) ──
+  // Jika ada pending_captcha.json di salah satu folder, teks user dianggap kode
+  // captcha dan ditulis ke captcha_answer.txt folder itu.
+  //   - automated-pengaduan-listener  → login SPB
+  //   - automated-organisasi-iko      → auto-login Monev (fallback saat AI gagal)
+  const CAPTCHA_DIRS = [
+    path.join(__dirname, '../../automated-pengaduan-listener'),
+    path.join(__dirname, '../../automated-organisasi-iko'),
+  ];
   try {
-    const pendingPath = path.join(__dirname, '../../automated-pengaduan-listener/pending_captcha.json');
-    const answerPath = path.join(__dirname, '../../automated-pengaduan-listener/captcha_answer.txt');
-    if (fs.existsSync(pendingPath)) {
+    for (const dir of CAPTCHA_DIRS) {
+      const pendingPath = path.join(dir, 'pending_captcha.json');
+      const answerPath = path.join(dir, 'captcha_answer.txt');
+      if (!fs.existsSync(pendingPath)) continue;
       const pending = JSON.parse(fs.readFileSync(pendingPath, 'utf-8'));
       const expired = Date.now() - (pending.createdAt || 0) > 10 * 60 * 1000;
       if (!expired) {
@@ -869,6 +879,8 @@ bot.on('callback_query', async (callbackQuery) => {
     cmd_tugas_semua: 'tugas-semua',
     cmd_absensi: 'absensi',
     cmd_bbm: 'bbm',
+    cmd_undangan_hariini: 'undangan-hariini',
+    cmd_undangan_besok: 'undangan-besok',
   };
   if (CMD_MAP[data]) {
     await bot.answerCallbackQuery(callbackQuery.id, { text: '⏳ Memproses...' });

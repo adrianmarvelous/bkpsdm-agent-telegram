@@ -11,7 +11,7 @@
  *   ORGANISASI_CAPTCHA=4KmZu node index.js
  *   HEADLESS=false node index.js       → mode terlihat (inspeksi lokal)
  */
-require('dotenv').config({ path: require('path').join(__dirname, '.env') });
+require('dotenv').config({ path: require('path').resolve(__dirname, '..', '.env') }); // root .env (env digabung)
 
 const path = require('path');
 const fs = require('fs');

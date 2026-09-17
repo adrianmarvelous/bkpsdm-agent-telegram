@@ -1,0 +1,7 @@
+.env
+node_modules/
+
+# Arsip tiap modul — memuat data pribadi (NIP/NIK + nama pegawai).
+# Hanya disimpan lokal di VPS, tidak di-push ke GitHub.
+sp-kantorku-wfo/arsip/
+kampung-pancasila/arsip/

@@ -1,0 +1,16 @@
+{
+  "name": "automated-sdm-cuti",
+  "version": "1.0.0",
+  "description": "Klien API data cuti SDM BKPSDM Surabaya (diusulkan bulan ini)",
+  "main": "index.js",
+  "private": true,
+  "scripts": {
+    "start": "node index.js",
+    "json": "node index.js --json",
+    "ringkas": "node index.js --ringkas",
+    "login": "node index.js --login"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5"
+  }
+}

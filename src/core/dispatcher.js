@@ -20,6 +20,9 @@ const { getHistory, addMessage, clearHistory } = require('../services/conversati
 const { askAI } = require('../services/ai');
 const { generateAbsensiPdf } = require('../services/pdfGenerator');
 const { isPulangCepat, countPulangCepat, isKeteranganNormal, countKeteranganNormal } = require('../services/absensiRules');
+const esurat = require('../../automated-esurat'); // agenda undangan KantorKu (lihat automated-esurat/)
+const { resolveUnitList, cocokUnit, labelUnit, unitDariTeks } = require('../../automated-esurat/units');
+const agendaGabungan = require('../services/agendaGabungan'); // gabungan API jadwal + API eSurat
 
 // =============== DETEKSI QUERY (diport verbatim dari bot.js) ===============
 
@@ -185,6 +188,90 @@ function detectAbsensiQuery(text) {
 
 // =============== FORMATTER (diport verbatim dari bot.js) ===============
 
+// ===================== eSurat — undangan KantorKu =====================
+// Unit tujuan DEFAULT kalau pesan tidak menyebut unit tertentu (mis. "undangan esurat
+// hari ini"). Bisa diubah lewat env ESURAT_UNIT_FILTER. Pesan boleh menyebut unit lain
+// (mis. "undangan esurat keuangan") atau "tanpa filter"/"semua unit" untuk semua unit.
+// Daftar alias unit: automated-esurat/units.js
+const ESURAT_UNIT = (process.env.ESURAT_UNIT_FILTER || 'SEKRETARIAT').trim().toUpperCase();
+
+/** Tanggal hari ini (atau digeser n hari) dalam WIB / UTC+7. */
+function tanggalWib(geserHari = 0) {
+  return new Date(Date.now() + 7 * 3600 * 1000 + geserHari * 86400000).toISOString().slice(0, 10);
+}
+
+/** Escape HTML untuk parse_mode: HTML (Telegram). */
+function escapeHtml(s) {
+  return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+/**
+ * Deteksi perintah undangan eSurat → { tanggal } atau null.
+ * Contoh yang dikenali:
+ *   undangan esurat / cek undangan esurat      → hari ini
+ *   undangan esurat hari ini | sekarang        → hari ini
+ *   undangan esurat besok / kemarin            → besok / kemarin
+ *   undangan esurat tanggal 2026-08-05         → tanggal itu
+ *   undangan esurat 5 agustus 2026             → tanggal itu
+ *   /undangan-hariini | /undangan-besok        → hari ini / besok
+ */
+function detectEsuratQuery(text) {
+  const lower = String(text || '').toLowerCase();
+  // Pemicu: menyebut "esurat"/"e-surat", ATAU diawali kata "undangan"
+  // (mis. "/undangan-hariini"), ATAU memuat "undangan" bersamaan "agenda"
+  // (mis. "agenda undangan hari ini"). Mencegah false-positive pada kalimat
+  // lain yang cuma kebetulan memuat kata "undangan".
+  const mentionsSurat = /e-?surat/i.test(lower);
+  const undanganAgenda = /\bundangan\b/i.test(lower) && /\bagenda\b/i.test(lower);
+  // "undangan ..." hanya dianggap perintah kalau lanjutannya berupa waktu/tanggal
+  // (mis. "undangan hari ini", "/undangan-hariini"), supaya kalimat lain seperti
+  // "undangan pernikahan" tidak ikut tertarik.
+  const afterUndangan = lower.replace(/^\/?undangan[-_\s]*/i, '');
+  const adaWaktu = /(hari\s*ini|hariini|besok|kemarin|tanggal|depan|\bini\b|\d{4}[-/]\d{1,2}|\d{1,2}\s+(jan|feb|mar|apr|mei|jun|jul|agt|agu|sep|okt|nov|des))/i.test(afterUndangan);
+  const undanganTemporal = /^\/?undangan\b/i.test(lower) && adaWaktu;
+  if (!mentionsSurat && !undanganAgenda && !undanganTemporal) return null;
+
+  if (/besok/i.test(lower)) return { tanggal: tanggalWib(1) };
+  if (/kemarin/i.test(lower)) return { tanggal: tanggalWib(-1) };
+  if (/(hari\s*ini|sekarang|today)/i.test(lower)) return { tanggal: tanggalWib(0) };
+
+  const iso = text.match(/(\d{4})[-/](\d{1,2})[-/](\d{1,2})/);
+  if (iso) return { tanggal: `${iso[1]}-${String(iso[2]).padStart(2, '0')}-${String(iso[3]).padStart(2, '0')}` };
+  const dmy = text.match(/(\d{1,2})[-/](\d{1,2})[-/](\d{4})/);
+  if (dmy) return { tanggal: `${dmy[3]}-${String(dmy[2]).padStart(2, '0')}-${String(dmy[1]).padStart(2, '0')}` };
+
+  const tglIndo = parseTanggal(text);
+  if (tglIndo) return { tanggal: tglIndo };
+
+  return { tanggal: tanggalWib(0) };
+}
+
+/** Daftar undangan (sudah difilter unit SEKRETARIAT) → teks siap kirim. */
+function formatUndangan(rows, tanggal, channel = 'telegram', unitLabel = ESURAT_UNIT) {
+  const wa = channel === 'whatsapp';
+  const b = (s) => (wa ? `*${s}*` : `<b>${s}</b>`);
+  const t = (s) => (wa ? String(s == null ? '' : s) : escapeHtml(s));
+  const tglTxt = formatTanggalIndonesia(tanggal);
+
+  if (!rows.length) {
+    return { text: `📭 Tidak ada undangan ${unitLabel} untuk ${tglTxt}.`, keyboard: [] };
+  }
+
+  const lines = [b(`📨 UNDANGAN eSURAT — ${unitLabel}`), `📅 ${tglTxt} · ${rows.length} undangan`, ''];
+  rows.forEach((r, i) => {
+    lines.push(`${i + 1}. ${b(t(r.acara || '(tanpa nama acara)'))}`);
+    lines.push(`🕐 ${r.pukulAwal || '-'}${r.pukulAkhir ? '–' + r.pukulAkhir : ''} WIB`);
+    if (r.tempat) lines.push(`📍 ${t(r.tempat)}`);
+    if (r.pengirim) lines.push(`🏢 ${t(r.pengirim)}`);
+    if (r.tujuanUser) lines.push(`👤 ${t(r.tujuanUser)}`);
+    if (r.penerima.length) lines.push(`👥 ${t(r.penerima.map((x) => x.nama || x.nip).join('; '))}`);
+    if (r.isiDisposisi) lines.push(`📝 ${t(r.isiDisposisi)}`);
+    if (r.suratPdf) lines.push(wa ? `📄 Surat: ${r.suratPdf}` : `📄 <a href="${escapeHtml(r.suratPdf)}">Surat</a>`);
+    lines.push('');
+  });
+  return { text: lines.join('\n').trim(), keyboard: [] };
+}
+
 /**
  * Format jadwal rapat.
  * channel 'whatsapp' → tanpa hint tombol disposisi (WA Fase 1 belum punya disposisi).
@@ -210,6 +297,34 @@ function formatJadwal(rows, title, channel = 'telegram') {
     msg += '<i>Klik tombol di bawah untuk disposisi rapat</i>';
   }
   return { text: msg, keyboard };
+}
+
+/**
+ * JALANKAN PERINTAH JADWAL RAPAT — memakai GABUNGAN dua API.
+ *
+ * Alur: API jadwal rapat (WEB) + API undangan eSurat → di-join lewat
+ * jadwal.id_surat_masuk === esurat.id_surat_masuk → difilter tujuan unit.
+ * Aturan filter (A/B/C) ada di src/services/agendaGabungan.js.
+ *
+ * Pengecualian: `get_semua_jadwal_rapat` tetap memakai jalur lama, karena
+ * /jadwal/semua.php mengembalikan tanggal rusak (6200-08-13) sehingga tidak
+ * bisa di-join dengan eSurat per tanggal.
+ */
+async function jalankanJadwalGabungan(tool, args, title, channel) {
+  if (tool === 'get_semua_jadwal_rapat') {
+    const result = await executeTool(tool, args);
+    return renderQueryResult(formatJadwal(result, title, channel), '📭 Tidak ada jadwal rapat.', channel);
+  }
+  const mode = tool === 'get_jadwal_rapat_minggu_ini' ? 'minggu'
+    : tool === 'get_jadwal_rapat_by_tanggal' ? 'tanggal'
+      : 'hari-ini';
+
+  const hasil = await agendaGabungan.ambilAgenda({
+    mode,
+    tanggal: mode === 'tanggal' ? (args && args.tanggal) : undefined,
+  });
+  const formatted = agendaGabungan.formatAgendaGabungan(hasil.merged, title, channel, hasil.unitLabel);
+  return renderQueryResult(formatted, '📭 Tidak ada jadwal rapat.', channel);
 }
 
 function formatTugas(rows, title, channel = 'telegram') {
@@ -406,6 +521,8 @@ function buildHelpText(channel = 'telegram') {
     '• "Tugas tupoksi hari ini"',
     '• "Tugas tupoksi 8 september"',
     '• "Absensi 4 agustus"',
+    '• "Undangan esurat hari ini"',
+    '• "Undangan esurat 5 agustus"',
     '',
     '📌 *Perintah khusus:*',
     `${cmd('/start')} — Menu utama`,
@@ -425,6 +542,11 @@ function buildHelpText(channel = 'telegram') {
     `${cmd('/tugas 25 juni')} — Tugas tanggal spesifik`,
     `${cmd('/bbm')} — BBM Non-Fosil hari ini`,
     `${cmd('/bbm 26 juni')} — BBM Non-Fosil tanggal spesifik`,
+    '',
+    '📨 *Undangan eSurat (hanya unit SEKRETARIAT):*',
+    `${cmd('/undangan-hariini')} — Undangan Sekretariat hari ini`,
+    `${cmd('/undangan-besok')} — Undangan Sekretariat besok`,
+    '"undangan esurat 5 agustus" — Undangan Sekretariat tanggal tertentu',
     '',
     '💡 *Tips:* Semakin detail pertanyaanmu, semakin baik jawabannya!',
   ].join('\n');
@@ -495,31 +617,34 @@ async function handleMessage({ text, userId, authorized = true, channel = 'teleg
     if (firstWord === 'jadwal' && parts[1]) {
       const tanggal = parseIndonesianDate(parts.slice(1).join(' '));
       if (tanggal) {
-        const result = await executeTool('get_jadwal_rapat_by_tanggal', { tanggal });
-        const formatted = formatJadwal(result, `Jadwal Rapat ${tanggal} 📆`, channel);
-        return renderQueryResult(formatted, '📭 Tidak ada jadwal rapat.', channel);
+        return await jalankanJadwalGabungan(
+          'get_jadwal_rapat_by_tanggal', { tanggal },
+          `Jadwal Rapat ${agendaGabungan.tanggalIndo(tanggal)} 📆`, channel,
+        );
       }
       // Bukan tanggal — coba deteksi bahasa alami (mis. "jadwal rapat hari ini")
       const natQuery = detectJadwalQuery(input);
       if (natQuery) {
-        const result = await executeTool(natQuery.tool, natQuery.args);
         const titles = {
           get_jadwal_rapat_hari_ini: 'Jadwal Rapat Hari Ini 📆',
           get_jadwal_rapat_minggu_ini: 'Jadwal Rapat Minggu Ini 📆',
-          get_jadwal_rapat_by_tanggal: `Jadwal Rapat ${natQuery.args.tanggal || ''} 📆`,
+          get_jadwal_rapat_by_tanggal: `Jadwal Rapat ${agendaGabungan.tanggalIndo(natQuery.args.tanggal)} 📆`,
           get_semua_jadwal_rapat: 'Semua Jadwal Rapat 📆',
         };
-        const formatted = formatJadwal(result, titles[natQuery.tool] || 'Jadwal Rapat', channel);
-        return renderQueryResult(formatted, '📭 Tidak ada jadwal rapat.', channel);
+        return await jalankanJadwalGabungan(
+          natQuery.tool, natQuery.args,
+          titles[natQuery.tool] || 'Jadwal Rapat', channel,
+        );
       }
       return [{ type: 'text', text: '⚠️ Format: `jadwal YYYY-MM-DD` atau `jadwal 26 juni`' }];
     }
     if (firstWord === 'jadwal-besok' || firstWord === 'jadwal_besok') {
-      const besok = new Date(Date.now() + 86400000);
-      const tgl = `${besok.getFullYear()}-${String(besok.getMonth() + 1).padStart(2, '0')}-${String(besok.getDate()).padStart(2, '0')}`;
-      const result = await executeTool('get_jadwal_rapat_by_tanggal', { tanggal: tgl });
-      const formatted = formatJadwal(result, `Jadwal Rapat Besok (${tgl}) 📆`, channel);
-      return renderQueryResult(formatted, '📭 Tidak ada jadwal rapat.', channel);
+      const tgl = agendaGabungan.todayWib(); // lalu +1 hari
+      const besok = new Date(new Date(`${tgl}T00:00:00Z`).getTime() + 86400000).toISOString().slice(0, 10);
+      return await jalankanJadwalGabungan(
+        'get_jadwal_rapat_by_tanggal', { tanggal: besok },
+        `Jadwal Rapat Besok (${agendaGabungan.tanggalIndo(besok)}) 📆`, channel,
+      );
     }
 
     // ── TUPOKSI — harus SEBELUM branch 'tugas' biasa, karena frasa
@@ -609,24 +734,47 @@ async function handleMessage({ text, userId, authorized = true, channel = 'teleg
         formatted = formatTugas(result, exact.title, channel);
         emptyText = '📭 Tidak ada tugas.';
       } else {
-        formatted = formatJadwal(result, exact.title, channel);
-        emptyText = '📭 Tidak ada jadwal rapat.';
+        // Jadwal rapat → pakai gabungan 2 API (jadwal + eSurat)
+        return await jalankanJadwalGabungan(exact.tool, exact.args, exact.title, channel);
       }
       return renderQueryResult(formatted, emptyText, channel);
     }
 
     // ── Deteksi bahasa alami: jadwal → tugas → BBM → absensi ──
+    // ── eSurat: undangan (HANYA tujuan unit SEKRETARIAT) ──
+    // Ditaruh SEBELUM deteksi jadwal: frasa "agenda undangan ..." juga cocok
+    // dengan pola jadwal, dan perintah undangan harus menang.
+    const esuratQuery = detectEsuratQuery(input);
+    if (esuratQuery) {
+      // Unit tujuan: dari kata di pesan (mis. "keuangan"); kalau tidak disebut → default.
+      // unitDariTeks() mengembalikan null utk "tanpa filter"/"semua unit", undefined kalau tak disebut.
+      const unitHint = unitDariTeks(input);
+      const unitList = unitHint === undefined ? resolveUnitList(ESURAT_UNIT) : unitHint;
+      const unitLabel = unitList ? labelUnit(unitList) : 'SEMUA UNIT';
+      // Login TIDAK dipanggil manual di sini: getAgenda() sudah login otomatis
+      // (token di-cache per proses, dan kalau kena 401 ia login ulang sekali).
+      // Memanggil login() tiap request = bikin sesi baru terus → lambat & boros rate limit.
+      const resp = await esurat.getAgenda(esuratQuery.tanggal);
+      const rows = (resp.data || [])
+        .map(esurat.normalizeRow)
+        .filter((r) => cocokUnit(r.tujuanUnit, unitList));
+      const formatted = formatUndangan(rows, esuratQuery.tanggal, channel, unitLabel);
+      return renderQueryResult(formatted, `📭 Tidak ada undangan ${unitLabel}.`, channel);
+    }
+
     const jadwalQuery = detectJadwalQuery(input);
     if (jadwalQuery) {
-      const result = await executeTool(jadwalQuery.tool, jadwalQuery.args);
       const titles = {
         get_jadwal_rapat_hari_ini: 'Jadwal Rapat Hari Ini 📆',
         get_jadwal_rapat_minggu_ini: 'Jadwal Rapat Minggu Ini 📆',
-        get_jadwal_rapat_by_tanggal: `Jadwal Rapat ${jadwalQuery.args.tanggal || ''} 📆`,
+        get_jadwal_rapat_by_tanggal: `Jadwal Rapat ${agendaGabungan.tanggalIndo(jadwalQuery.args.tanggal)} 📆`,
         get_semua_jadwal_rapat: 'Semua Jadwal Rapat 📆',
       };
-      const formatted = formatJadwal(result, titles[jadwalQuery.tool] || 'Jadwal Rapat', channel);
-      return renderQueryResult(formatted, '📭 Tidak ada jadwal rapat.', channel);
+      // Gabungan API jadwal + undangan eSurat, difilter tujuan unit.
+      return await jalankanJadwalGabungan(
+        jadwalQuery.tool, jadwalQuery.args,
+        titles[jadwalQuery.tool] || 'Jadwal Rapat', channel,
+      );
     }
 
     const tugasQuery = detectTugasQuery(input);
@@ -729,6 +877,8 @@ module.exports = {
   detectTugasQuery,
   detectBbmQuery,
   detectAbsensiQuery,
+  detectEsuratQuery,
+  formatUndangan,
   parseTanggal,
   buildHelpText,
 };
