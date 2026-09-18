@@ -46,3 +46,6 @@ src/services/tekocak_new.js
 automated-organisasi-iko/captcha_auto.png
 automated-organisasi-iko/gen-captcha-samples.js
 automated-organisasi-iko/tmp-test-*.js
+
+# Cache data pegawai (memuat NIP/NIK/nama) — JANGAN di-commit, repo publik
+data/
